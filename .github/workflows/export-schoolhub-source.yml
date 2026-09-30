@@ -1,0 +1,43 @@
+name: Export SchoolHub Source
+
+on:
+  push:
+    branches:
+      - schoolhub-build
+    paths:
+      - ".github/workflows/export-schoolhub-source.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct source
+        shell: bash
+        run: |
+          set -euo pipefail
+          parts=(.schoolhub-v2.2/source.part*)
+          test "${#parts[@]}" -eq 31
+          cat "${parts[@]}" | tr -d '\r\n' | base64 -d > source.tar.xz
+          echo "11a25bb9e4b54868a2754b15d3c665b5384fb24cc06946a3fb0f29af6f135ba8  source.tar.xz" | sha256sum -c -
+          tar -xf source.tar.xz
+
+      - name: Export auditable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .schoolhub-source-audit
+          mkdir -p .schoolhub-source-audit
+          cp -R src .schoolhub-source-audit/
+          cp SchoolHub.spec requirements.txt .schoolhub-source-audit/
+          if [ -d tests ]; then cp -R tests .schoolhub-source-audit/; fi
+          find .schoolhub-source-audit -type d -name __pycache__ -prune -exec rm -rf {} +
+          git config user.name "SchoolHub Build Bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add .schoolhub-source-audit
+          git commit -m "Export SchoolHub source for 2.4 optimization audit"
+          git push origin HEAD:schoolhub-build
