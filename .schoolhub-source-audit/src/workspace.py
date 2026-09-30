@@ -64,6 +64,14 @@ class WorkspaceManager:
     def exists(self):
         return self.vault_path.is_dir() and self.meta_path.is_file() and self.files_path.is_dir()
 
+    @property
+    def has_plaintext(self):
+        """True when a readable working copy already exists on disk."""
+        try:
+            return self.workspace_path.is_dir() and bool(self._iter_plain_files())
+        except Exception:
+            return False
+
     def get_unlocked_path(self):
         if not self.is_unlocked:
             raise WorkspaceError("Il Workspace è bloccato.")
@@ -696,6 +704,17 @@ class WorkspaceManager:
         self.last_warning = None
         key = self._verify_password(password)
         existing_plain = self._iter_plain_files() if self.workspace_path.exists() else []
+
+        # Instant Unlock: if a readable working copy is already present, it is
+        # the active work tree from the previous session. Never waste minutes
+        # decrypting the Vault again only to compare identical/stale working files.
+        # The password is still verified before access is granted.
+        if existing_plain:
+            self._unlocked = True
+            self._session_key = key
+            self._notify_progress(progress, 1.0, "Sblocco rapido", "Workspace già disponibile sul disco")
+            return
+
         temp_plain = self.workspace_path.with_name(self.workspace_path.name + ".unlocking-" + secrets.token_hex(8))
         temp_plain.mkdir(parents=True, exist_ok=False)
 
@@ -873,6 +892,21 @@ class WorkspaceManager:
                 try: os.replace(backup, self.workspace_path)
                 except Exception: pass
             raise
+
+    def session_lock(self):
+        """Forget the in-memory key but keep the readable working copy on disk.
+
+        This is intentionally a convenience lock, not encryption-at-rest. It
+        enables near-instant unlock after password verification.
+        """
+        if not self.is_unlocked:
+            return
+        self._unlocked = False
+        self._session_key = None
+        self.last_warning = (
+            "Blocco rapido attivo: i file restano leggibili sul disco. "
+            "Usa 'Cifra e chiudi' per rimuovere la copia in chiaro."
+        )
 
     def lock(self, password, progress=None):
         if not self.is_unlocked:
