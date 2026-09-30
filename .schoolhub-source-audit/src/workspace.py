@@ -66,9 +66,18 @@ class WorkspaceManager:
 
     @property
     def has_plaintext(self):
-        """True when a readable working copy already exists on disk."""
+        """Cheap check: stop as soon as one readable file exists."""
         try:
-            return self.workspace_path.is_dir() and bool(self._iter_plain_files())
+            if not self.workspace_path.is_dir():
+                return False
+            for root, dirs, files in os.walk(self.workspace_path, followlinks=False):
+                root_path = Path(root)
+                dirs[:] = [d for d in dirs if not (root_path / d).is_symlink()]
+                for name in files:
+                    p = root_path / name
+                    self._ensure_not_symlink(p)
+                    return True
+            return False
         except Exception:
             return False
 
@@ -703,17 +712,18 @@ class WorkspaceManager:
 
         self.last_warning = None
         key = self._verify_password(password)
-        existing_plain = self._iter_plain_files() if self.workspace_path.exists() else []
 
         # Instant Unlock: if a readable working copy is already present, it is
         # the active work tree from the previous session. Never waste minutes
         # decrypting the Vault again only to compare identical/stale working files.
         # The password is still verified before access is granted.
-        if existing_plain:
+        if self.has_plaintext:
             self._unlocked = True
             self._session_key = key
             self._notify_progress(progress, 1.0, "Sblocco rapido", "Workspace già disponibile sul disco")
             return
+
+        existing_plain = []
 
         temp_plain = self.workspace_path.with_name(self.workspace_path.name + ".unlocking-" + secrets.token_hex(8))
         temp_plain.mkdir(parents=True, exist_ok=False)
