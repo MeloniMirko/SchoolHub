@@ -2699,7 +2699,9 @@ class SchoolHub:
         temp_root = tempfile.mkdtemp(prefix="schoolhub-status-")
         repo = os.path.join(temp_root, "repo")
         try:
-            self._assert_remote_private()
+            visibility = self._remote_visibility()
+            if visibility == "public":
+                return None, None, "GitHub pubblico: dati SchoolHub cifrati sul branch schoolhub-encrypted-data."
             self._clone_remote(repo)
             local_files = self._hash_tree(self.workspace.get_unlocked_path())
             remote_files = self._hash_tree(repo)
@@ -2708,40 +2710,49 @@ class SchoolHub:
             local_only, remote_only, conflicts = self._classify_changes(baseline, local_files, remote_files)
             self.last_conflicts = conflicts[:100]
             return len(local_only) + len(conflicts), len(remote_only) + len(conflicts), bool(local_only or remote_only or conflicts)
-        except Exception as e:
-            return None, None, str(e)
+        except Exception as exc:
+            return None, None, str(exc)
         finally:
             shutil.rmtree(temp_root, ignore_errors=True)
 
     def start_sync(self, manual=True):
         if not self.git_enabled or not self.remote:
             if manual:
-                messagebox.showwarning("GitHub non configurato", "SchoolHub funziona in locale. Per sincronizzare, configura nelle Impostazioni un repository GitHub PRIVATO.", parent=self.root)
+                messagebox.showwarning("GitHub non configurato", "Configura un repository GitHub nelle Impostazioni.", parent=self.root)
             return
         if self.sync_running:
-            if manual: messagebox.showinfo("SchoolHub", "Una sincronizzazione è già in corso.", parent=self.root)
+            if manual:
+                messagebox.showinfo("SchoolHub", "Una sincronizzazione è già in corso.", parent=self.root)
             return
         if self.workspace_busy:
-            if manual: messagebox.showinfo("SchoolHub", "È in corso un'operazione sul Workspace. Attendi che termini.", parent=self.root)
-            else: self.write_log("◷ Sync automatica saltata: Workspace occupato.")
+            if manual:
+                messagebox.showinfo("SchoolHub", "È in corso un'operazione sul Workspace. Attendi che termini.", parent=self.root)
+            else:
+                self.write_log("◷ Sync automatica saltata: Workspace occupato.")
             return
         if not self.workspace.exists:
-            if manual: messagebox.showwarning("Workspace", "Crea prima il Workspace cifrato.", parent=self.root)
-            else: self.write_log("◷ Sync automatica saltata: Workspace non ancora creato.")
+            if manual:
+                messagebox.showwarning("Workspace", "Crea prima il Workspace cifrato.", parent=self.root)
+            else:
+                self.write_log("◷ Sync automatica saltata: Workspace non ancora creato.")
             return
 
         password = None
-        if not self.workspace.is_unlocked:
-            if not manual:
-                self.write_log("◷ Sync automatica saltata: Workspace bloccato.")
+        if manual:
+            password = self.ask_password(
+                "Sincronizza Workspace",
+                "Inserisci la password del Workspace. Nei repository pubblici serve a cifrare/decifrare il payload remoto."
+            )
+            if password is None:
                 return
-            password = self.ask_password("Sincronizza Workspace", "Inserisci la password per leggere temporaneamente il Vault durante la sincronizzazione.")
-            if password is None: return
+        elif not self.workspace.is_unlocked:
+            self.write_log("◷ Sync automatica saltata: Workspace bloccato.")
+            return
 
         self.sync_running = True
-        self.open_progress("Sincronizzazione SchoolHub", "Workspace cifrato ↔ repository GitHub privato")
+        self.open_progress("Sincronizzazione SchoolHub", "Workspace ↔ GitHub")
         self.progress_update(2, "Preparazione", "Creazione snapshot sicuro")
-        self.set_status("SINCRONIZZAZIONE...", YELLOW, "Workspace cifrato ↔ GitHub privato")
+        self.set_status("SINCRONIZZAZIONE...", YELLOW, "Workspace ↔ GitHub")
         threading.Thread(target=self.sync_worker, args=(password,), daemon=True).start()
 
     def sync_worker(self, password=None):
@@ -2750,36 +2761,126 @@ class SchoolHub:
         try:
             self.progress_update(5, "Snapshot", "Preparazione dei file locali")
             source, _ = self._get_sync_source(password, temp_root)
-            self.progress_update(14, "Analisi", "Calcolo impronte SHA-256")
+            self.progress_update(12, "Analisi", "Calcolo impronte SHA-256")
             local_files = self._hash_tree(source)
             state = self._load_sync_state()
+            baseline = state.get("files", {}) if state is not None else {}
 
-            self.progress_update(20, "Sicurezza", "Verifica che il repository non sia pubblico")
-            self._assert_remote_private()
-            self.write_log("↔ Scaricamento repository GitHub privato in area temporanea...")
-            self.progress_update(28, "Download GitHub", "Clone shallow del repository")
+            self.progress_update(18, "GitHub", "Rilevamento modalità repository")
+            visibility = self._remote_visibility()
+
+            if visibility == "public":
+                if not password:
+                    raise WorkspaceError(
+                        "Il repository è pubblico e usa la modalità cifrata. Avvia una sincronizzazione manuale e inserisci la password."
+                    )
+                data_branch = PUBLIC_DATA_BRANCH
+                self.write_log(f"🔐 Repository pubblico: uso esclusivo del branch cifrato {data_branch}.")
+                self.progress_update(24, "Download GitHub", f"Branch cifrato {data_branch}")
+                self._clone_remote(repo, branch=data_branch)
+
+                self.progress_update(34, "Decifratura remota", "Verifica e apertura del payload cifrato")
+                remote_plain = self._public_remote_unpack(repo, password, temp_root)
+                self.progress_update(44, "Confronto", "Analisi differenze locale ↔ payload cifrato")
+                remote_files = self._hash_tree(remote_plain)
+
+                local_only, remote_only, conflicts = self._classify_changes(baseline, local_files, remote_files)
+                self.last_conflicts = conflicts[:100]
+                if conflicts:
+                    prefix = "Prima sincronizzazione: " if state is None else ""
+                    raise WorkspaceError(
+                        prefix + f"conflitto su {len(conflicts)} file. Apri Conflitti e scegli quale versione mantenere."
+                    )
+
+                if self.workspace.is_unlocked and self._hash_tree(self.workspace.get_unlocked_path()) != local_files:
+                    raise WorkspaceError(
+                        "Il Workspace è stato modificato durante la sincronizzazione. Nessun file viene sovrascritto: riprova."
+                    )
+
+                if not local_only and not remote_only:
+                    if state is None or baseline != remote_files:
+                        self._save_sync_state(remote_files)
+                    self.write_log("✓ Payload cifrato pubblico già sincronizzato.")
+                    self.progress_update(100, "Completato", "Tutto aggiornato")
+                    self.finish_status("SINCRONIZZATO", GREEN, "GitHub pubblico cifrato · tutto aggiornato")
+                    time.sleep(0.2)
+                    return
+
+                self.progress_update(54, "Merge", f"{len(local_only)} locali · {len(remote_only)} remoti")
+                if local_only:
+                    self._apply_paths(source, remote_plain, local_files, local_only)
+
+                self.progress_update(64, "Vault locale", "Applicazione del risultato")
+                self._persist_sync_tree(remote_plain, password, temp_root)
+
+                if local_only:
+                    self.progress_update(72, "Cifratura GitHub", "Creazione payload opaco e chunk")
+                    self._public_remote_pack(remote_plain, repo, password, temp_root)
+                    self._ensure_git_identity(repo)
+                    code, _, err = self.git(["add", "-A"], cwd=repo)
+                    if code != 0:
+                        raise WorkspaceError(err or "git add fallito.")
+                    message = "SchoolHub encrypted initial sync" if state is None else "SchoolHub encrypted sync"
+                    code, out, err = self.git(["commit", "-m", message], cwd=repo)
+                    if code != 0 and "nothing to commit" not in (out + " " + err).lower():
+                        raise WorkspaceError(err or out or "git commit fallito.")
+
+                    self.progress_update(86, "Upload GitHub", "Invio esclusivamente dei blocchi cifrati")
+                    code, out, err = self.git(["push", "-u", "origin", data_branch], cwd=repo)
+                    if code != 0:
+                        raise WorkspaceError(err or out or "git push fallito.")
+                    self.progress_update(93, "Verifica remota", "Controllo commit cifrato pubblicato")
+                    self._verify_remote_head(repo, branch=data_branch)
+
+                final_files = self._hash_tree(remote_plain)
+                self.progress_update(96, "Verifica finale", "Controllo Workspace ↔ risultato decifrato")
+                if self.workspace.is_unlocked:
+                    if self._hash_tree(self.workspace.get_unlocked_path()) != final_files:
+                        raise WorkspaceError("Verifica finale fallita: Workspace e risultato remoto non coincidono.")
+                else:
+                    verify_dir = os.path.join(temp_root, "verify-final")
+                    self.workspace.export_to(verify_dir, password)
+                    if self._hash_tree(verify_dir) != final_files:
+                        raise WorkspaceError("Verifica finale fallita: Vault locale e risultato remoto non coincidono.")
+
+                self._save_sync_state(final_files)
+                self.last_conflicts = []
+                if local_only and remote_only:
+                    self.write_log(f"↔ Sync cifrata pubblica: {len(local_only)} locali + {len(remote_only)} remoti uniti.")
+                elif local_only:
+                    self.write_log(f"↑ {len(local_only)} modifiche locali inviate in forma cifrata al repo pubblico.")
+                else:
+                    self.write_log(f"↓ {len(remote_only)} modifiche cifrate GitHub importate nel Vault.")
+                self.progress_update(100, "Completato", "Sincronizzazione cifrata completata")
+                self.finish_status("SINCRONIZZATO", GREEN, "GitHub pubblico · payload cifrato")
+                time.sleep(0.2)
+                return
+
+            # Private repositories retain the original plaintext-on-private-repo workflow.
+            self.write_log("↔ Repository privato: sincronizzazione standard.")
+            self.progress_update(28, "Download GitHub", "Clone shallow del repository privato")
             self._clone_remote(repo)
             self.progress_update(43, "Confronto", "Analisi differenze locale ↔ GitHub")
             remote_files = self._hash_tree(repo)
 
-            baseline = state.get("files", {}) if state is not None else {}
             local_only, remote_only, conflicts = self._classify_changes(baseline, local_files, remote_files)
             self.last_conflicts = conflicts[:100]
-
             if conflicts:
                 prefix = "Prima sincronizzazione: " if state is None else ""
-                raise WorkspaceError(prefix + f"conflitto su {len(conflicts)} file. Workspace e GitHub contengono versioni diverse degli stessi percorsi. Apri Conflitti e scegli quale versione mantenere.")
+                raise WorkspaceError(
+                    prefix + f"conflitto su {len(conflicts)} file. Workspace e GitHub contengono versioni diverse degli stessi percorsi."
+                )
 
             if self.workspace.is_unlocked and self._hash_tree(self.workspace.get_unlocked_path()) != local_files:
-                raise WorkspaceError("Il Workspace è stato modificato mentre la sincronizzazione era in corso. Nessun file viene sovrascritto: avvia di nuovo la sync.")
+                raise WorkspaceError("Il Workspace è stato modificato mentre la sincronizzazione era in corso. Riprova.")
 
             if not local_only and not remote_only:
                 if state is None or baseline != remote_files:
                     self._save_sync_state(remote_files)
-                self.write_log("✓ Repository già sincronizzato." if state is not None else "✓ Prima sincronizzazione: Workspace e GitHub sono già identici.")
+                self.write_log("✓ Repository privato già sincronizzato.")
                 self.progress_update(100, "Completato", "Tutto aggiornato")
                 self.finish_status("SINCRONIZZATO", GREEN, "Tutto aggiornato")
-                time.sleep(0.25)
+                time.sleep(0.2)
                 return
 
             self.progress_update(52, "Merge", f"{len(local_only)} locali · {len(remote_only)} remoti")
@@ -2793,44 +2894,42 @@ class SchoolHub:
                 self.progress_update(78, "Commit", "Preparazione modifiche Git")
                 self._ensure_git_identity(repo)
                 code, _, err = self.git(["add", "-A"], cwd=repo)
-                if code != 0: raise WorkspaceError(err or "git add fallito.")
+                if code != 0:
+                    raise WorkspaceError(err or "git add fallito.")
                 message = "SchoolHub initial sync" if state is None else "SchoolHub automatic sync"
                 code, out, err = self.git(["commit", "-m", message], cwd=repo)
                 if code != 0 and "nothing to commit" not in (out + " " + err).lower():
                     raise WorkspaceError(err or out or "git commit fallito.")
                 self.progress_update(86, "Upload GitHub", "Invio modifiche al repository privato")
                 code, out, err = self.git(["push", "-u", "origin", self.branch], cwd=repo)
-                if code != 0: raise WorkspaceError(err or out or "git push fallito.")
+                if code != 0:
+                    raise WorkspaceError(err or out or "git push fallito.")
                 self.progress_update(93, "Verifica remota", "Controllo commit pubblicato")
                 self._verify_remote_head(repo)
 
             final_files = self._hash_tree(repo)
-            self.progress_update(96, "Verifica finale", "Confronto byte per byte tramite SHA-256")
+            self.progress_update(96, "Verifica finale", "Confronto tramite SHA-256")
             if self.workspace.is_unlocked:
                 if self._hash_tree(self.workspace.get_unlocked_path()) != final_files:
                     raise WorkspaceError("Verifica finale fallita: Workspace e repository temporaneo non coincidono.")
             else:
-                verify_dir = os.path.join(temp_root, "verify-final")
+                verify_dir = os.path.join(temp_root, "verify-final-private")
                 self.workspace.export_to(verify_dir, password)
                 if self._hash_tree(verify_dir) != final_files:
-                    raise WorkspaceError("Verifica finale fallita: Vault cifrato e repository temporaneo non coincidono.")
+                    raise WorkspaceError("Verifica finale fallita: Vault e repository temporaneo non coincidono.")
 
             self._save_sync_state(final_files)
             self.last_conflicts = []
-            if local_only and remote_only:
-                self.write_log(f"↔ Sync completata: {len(local_only)} modifiche locali + {len(remote_only)} modifiche GitHub unite senza conflitti.")
-            elif local_only:
-                self.write_log(f"↑ {len(local_only)} modifiche locali sincronizzate su GitHub.")
-            else:
-                self.write_log(f"↓ {len(remote_only)} modifiche GitHub importate nel Vault.")
             self.progress_update(100, "Completato", "Sincronizzazione completata")
             self.finish_status("SINCRONIZZATO", GREEN, "Sincronizzazione completata")
-            time.sleep(0.25)
-        except Exception as e:
-            self.write_log(f"✕ ERRORE SYNC: {e}")
-            self.progress_update(100, "Errore", str(e))
-            if self.last_conflicts: self.finish_status("CONFLITTO", RED, str(e))
-            else: self.finish_status("ERRORE", RED, str(e))
+            time.sleep(0.2)
+        except Exception as exc:
+            self.write_log(f"✕ ERRORE SYNC: {exc}")
+            self.progress_update(100, "Errore", str(exc))
+            if self.last_conflicts:
+                self.finish_status("CONFLITTO", RED, str(exc))
+            else:
+                self.finish_status("ERRORE", RED, str(exc))
             time.sleep(0.6)
         finally:
             shutil.rmtree(temp_root, ignore_errors=True)
