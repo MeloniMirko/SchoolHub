@@ -28,9 +28,9 @@ CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 LOG_FILE = os.path.join(APP_DIR, "schoolhub.log")
 SYNC_STATE_FILE = os.path.join(APP_DIR, "sync_state.json")
 
-APP_VERSION = "2.4.1"
+APP_VERSION = "2.4.2"
 RELEASE_API = "https://api.github.com/repos/MeloniMirko/Scuola/releases/latest"
-UPDATE_USER_AGENT = "SchoolHub-Updater/2.4.1"
+UPDATE_USER_AGENT = "SchoolHub-Updater/2.4.2"
 UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 UPDATE_STAMP_FILE = os.path.join(APP_DIR, "last_update_check.txt")
 GIT_TIMEOUT_SECONDS = 180
@@ -3217,7 +3217,27 @@ def _frozen_self_test(output_path):
         with open(media_enc, "rb") as fh:
             if fh.read(6) != b"SHENC2":
                 raise RuntimeError("Formato streaming SHENC2 non attivo")
+
+        # Legacy SHENC1 regression test: emulate a large old-format file and
+        # verify that 2.4.2 can stream-decrypt it instead of loading it all at once.
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        legacy_rel = "legacy-large.bin"
+        legacy_plain = (b"LegacySchoolHub" * 600000)  # > 8 MiB
+        legacy_key = wm._verify_password(password)
+        legacy_nonce = os.urandom(wm.NONCE_LEN)
+        legacy_aad = wm.FILE_AAD_PREFIX + legacy_rel.encode("utf-8")
+        legacy_cipher = AESGCM(legacy_key).encrypt(legacy_nonce, legacy_plain, legacy_aad)
+        legacy_path = os.path.join(vault, "files", legacy_rel)
+        with open(legacy_path, "wb") as fh:
+            fh.write(wm.FILE_MAGIC_V1)
+            fh.write(legacy_nonce)
+            fh.write(legacy_cipher)
+
         wm.unlock(password)
+        with open(os.path.join(ws, legacy_rel), "rb") as fh:
+            if fh.read() != legacy_plain:
+                raise RuntimeError("Legacy SHENC1 streaming unlock non valido")
+        result["checks"]["legacy_stream_unlock"] = True
         with open(os.path.join(ws, "selftest.txt"), "r", encoding="utf-8") as fh:
             if fh.read() != "SchoolHub self-test":
                 raise RuntimeError("Vault round-trip non valido")
