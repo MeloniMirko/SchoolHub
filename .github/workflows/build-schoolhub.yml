@@ -325,7 +325,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "schoolhub-v2.4.5"
-          $notes = "SchoolHub 2.4.5 Updater Fix: ripristina la sincronizzazione standard della 2.4.2 e consente anche repository GitHub pubblici senza bloccare la sync. Mantiene Instant Unlock, fix SHENC1 legacy, MinGit e test di integrità."
+          $notes = "SchoolHub 2.4.5 Updater Fix: corregge il riavvio dopo aggiornamento dei build PyInstaller one-file, aspettando la chiusura completa della vecchia istanza e avviando la nuova con ambiente PyInstaller pulito. Mantiene Simple Public Sync, Instant Unlock, fix SHENC1 legacy, MinGit e test di integrità."
           if (gh release view $tag --repo "$env:GITHUB_REPOSITORY" *> $null) {
             gh release upload $tag ".\dist\SchoolHub.exe#SchoolHub.exe" ".\dist\SchoolHub.exe.sha256.txt#SchoolHub.exe.sha256.txt" --clobber --repo "$env:GITHUB_REPOSITORY"
             gh release edit $tag --title "SchoolHub 2.4.5 Updater Fix" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
