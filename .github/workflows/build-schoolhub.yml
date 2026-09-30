@@ -7,6 +7,7 @@ on:
     paths:
       - ".github/workflows/build-schoolhub.yml"
       - ".schoolhub-v2.2/**"
+      - ".schoolhub-source-audit/**"
   workflow_dispatch:
 
 permissions:
@@ -21,7 +22,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Reconstruct source
+      - name: Reconstruct base source
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -33,6 +34,18 @@ jobs:
           $actual = (Get-FileHash "source.tar.xz" -Algorithm SHA256).Hash.ToLower()
           if ($actual -ne "11a25bb9e4b54868a2754b15d3c665b5384fb24cc06946a3fb0f29af6f135ba8") { throw "Source hash mismatch" }
           tar -xf "source.tar.xz"
+
+      - name: Apply SchoolHub 2.4 UltraLight source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Copy-Item ".schoolhub-source-audit\src\schoolhub_gui.py" ".\src\schoolhub_gui.py" -Force
+          Copy-Item ".schoolhub-source-audit\src\workspace.py" ".\src\workspace.py" -Force
+          Copy-Item ".schoolhub-source-audit\SchoolHub.spec" ".\SchoolHub.spec" -Force
+          Copy-Item ".schoolhub-source-audit\requirements.txt" ".\requirements.txt" -Force
+          if (Test-Path ".schoolhub-source-audit\tests") {
+            Copy-Item ".schoolhub-source-audit\tests\*" ".\tests\" -Recurse -Force
+          }
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -47,22 +60,21 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install Pillow
 
-      - name: Patch 2.3 instant startup
+      - name: Prepare 2.4 splash
         shell: pwsh
         run: |
           @'
           from pathlib import Path
           from PIL import Image, ImageDraw, ImageFont
-          
+
           root = Path('.')
           gui_path = root / 'src' / 'schoolhub_gui.py'
           spec_path = root / 'SchoolHub.spec'
-          
+
           gui = gui_path.read_text(encoding='utf-8')
-          if 'APP_VERSION = "2.2.0"' not in gui:
-              raise SystemExit('APP_VERSION marker not found')
-          gui = gui.replace('APP_VERSION = "2.2.0"', 'APP_VERSION = "2.3.0"', 1)
-          
+          if 'APP_VERSION = "2.4.0"' not in gui:
+              raise SystemExit('APP_VERSION 2.4.0 marker not found')
+
           lines = gui.splitlines()
           matches = [i for i, line in enumerate(lines) if line.strip() == 'root.mainloop()']
           if len(matches) != 1:
@@ -81,10 +93,9 @@ jobs:
               indent + 'root.mainloop()',
           ]
           lines[i:i+1] = block
-          gui = '\n'.join(lines) + '\n'
-          gui_path.write_text(gui, encoding='utf-8')
-          (root / 'VERSION.txt').write_text('2.3.0\n', encoding='utf-8')
-          
+          gui_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+          (root / 'VERSION.txt').write_text('2.4.0\n', encoding='utf-8')
+
           logo = Image.open(root / 'schoolhub_icon.png').convert('RGBA')
           canvas = Image.new('RGBA', (680, 410), (8, 17, 32, 255))
           draw = ImageDraw.Draw(canvas)
@@ -93,7 +104,7 @@ jobs:
           draw.rounded_rectangle((36, 328, 286, 356), radius=14, fill=(20, 121, 255, 255))
           logo.thumbnail((185, 185), Image.Resampling.LANCZOS)
           canvas.alpha_composite(logo, ((680-logo.width)//2, 38))
-          
+
           def font(size, bold=False):
               candidates = [
                   'C:/Windows/Fonts/segoeuib.ttf' if bold else 'C:/Windows/Fonts/segoeui.ttf',
@@ -105,19 +116,19 @@ jobs:
                   except Exception:
                       pass
               return ImageFont.load_default()
-          
+
           title_font = font(36, True)
           sub_font = font(16, False)
           small_font = font(12, False)
           title = 'SchoolHub'
           box = draw.textbbox((0, 0), title, font=title_font)
           draw.text(((680-(box[2]-box[0]))/2, 225), title, fill=(244, 248, 255, 255), font=title_font)
-          subtitle = 'Preparazione ambiente sicuro...'
+          subtitle = 'UltraLight · ambiente sicuro'
           box = draw.textbbox((0, 0), subtitle, font=sub_font)
           draw.text(((680-(box[2]-box[0]))/2, 276), subtitle, fill=(161, 188, 220, 255), font=sub_font)
-          draw.text((34, 374), 'SchoolHub 2.3.0 - Avvio applicazione', fill=(119, 151, 188, 255), font=small_font)
+          draw.text((34, 374), 'SchoolHub 2.4.0 - Avvio applicazione', fill=(119, 151, 188, 255), font=small_font)
           canvas.convert('RGB').save(root / 'schoolhub_splash.png', 'PNG')
-          
+
           spec = spec_path.read_text(encoding='utf-8')
           if 'Splash(' in spec:
               raise SystemExit('Spec already has Splash')
@@ -125,7 +136,7 @@ jobs:
           idx = spec.find(exe_marker)
           if idx < 0:
               raise SystemExit('EXE target not found')
-          splash_block = '''splash = Splash(
+          splash_block = """splash = Splash(
               'schoolhub_splash.png',
               binaries=a.binaries,
               datas=a.datas,
@@ -136,28 +147,28 @@ jobs:
               minify_script=True,
               always_on_top=True,
           )
-          
-          '''
+
+          """
           spec = spec[:idx] + splash_block + spec[idx:]
           open_pos = spec.find('(', spec.find(exe_marker))
           spec = spec[:open_pos+1] + '\n    splash,\n    splash.binaries,' + spec[open_pos+1:]
           spec_path.write_text(spec, encoding='utf-8')
-          print('SchoolHub 2.3 patch OK')
-          '@ | Set-Content ".schoolhub-v2.2\patch_23.py" -Encoding UTF8
-          python ".schoolhub-v2.2\patch_23.py"
+          print('SchoolHub 2.4 splash OK')
+          '@ | Set-Content ".schoolhub-v2.2\patch_24.py" -Encoding UTF8
+          python ".schoolhub-v2.2\patch_24.py"
 
       - name: Normalize Windows tests
         shell: pwsh
         run: |
           @'
           from pathlib import Path
-          
+
           media = Path('tests/test_media_streaming.py')
           text = media.read_text(encoding='utf-8-sig')
           if 'sys.path.insert' not in text:
               text = text.replace('from pathlib import Path', "from pathlib import Path\nimport sys\nsys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))", 1)
           media.write_text(text, encoding='utf-8')
-          
+
           p = Path('tests/test_schoolhub.py')
           lines = p.read_text(encoding='utf-8-sig').splitlines()
           out = []
@@ -173,7 +184,7 @@ jobs:
           '@ | Set-Content ".schoolhub-v2.2\normalize.py" -Encoding UTF8
           python ".schoolhub-v2.2\normalize.py"
 
-      - name: Privacy version and splash audit
+      - name: UltraLight privacy audit
         shell: pwsh
         run: |
           @'
@@ -190,26 +201,44 @@ jobs:
               for pattern in patterns:
                   if pattern.search(text):
                       raise SystemExit(f'Privacy audit failed in {p}')
-          gui = (root/'src'/'schoolhub_gui.py').read_text(encoding='utf-8')
-          if 'DEFAULT_REMOTE = ""' not in gui: raise SystemExit('default remote must be empty')
-          if '"auto_sync": False' not in gui: raise SystemExit('auto sync must default off')
-          if 'APP_VERSION = "2.3.0"' not in gui: raise SystemExit('version mismatch')
-          spec = (root/'SchoolHub.spec').read_text(encoding='utf-8')
-          if 'Splash(' not in spec or 'splash.binaries' not in spec: raise SystemExit('boot splash missing')
-          print('Audit OK')
-          '@ | Set-Content ".schoolhub-v2.2\audit.py" -Encoding UTF8
-          python ".schoolhub-v2.2\audit.py"
 
-      - name: Bundle Git for Windows
+          gui = (root/'src'/'schoolhub_gui.py').read_text(encoding='utf-8')
+          workspace = (root/'src'/'workspace.py').read_text(encoding='utf-8')
+          spec = (root/'SchoolHub.spec').read_text(encoding='utf-8')
+
+          checks = {
+              'safe default remote': 'DEFAULT_REMOTE = ""' in gui,
+              'auto sync default off': '"auto_sync": False' in gui,
+              'auto start default off': '"auto_start": False' in gui,
+              'version 2.4.0': 'APP_VERSION = "2.4.0"' in gui,
+              'daily update cache': 'UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60' in gui,
+              'minute clock': 'after(60000, self.update_clock)' in gui,
+              'single instance': 'def _acquire_single_instance()' in gui,
+              'lazy crypto': 'def _aesgcm()' in workspace and 'AESGCM(key)' not in workspace,
+              'lean hidden imports': 'hiddenimports = []' in spec,
+              'boot splash': 'Splash(' in spec and 'splash.binaries' in spec,
+          }
+          failed = [name for name, ok in checks.items() if not ok]
+          if failed:
+              raise SystemExit('UltraLight audit failed: ' + ', '.join(failed))
+          print('UltraLight audit OK:', ', '.join(checks))
+          '@ | Set-Content ".schoolhub-v2.2\audit_24.py" -Encoding UTF8
+          python ".schoolhub-v2.2\audit_24.py"
+
+      - name: Bundle official MinGit
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $gitCmd = (Get-Command git.exe).Source
-          $gitRoot = Split-Path (Split-Path $gitCmd -Parent) -Parent
-          New-Item -ItemType Directory -Force "vendor" | Out-Null
-          Copy-Item $gitRoot "vendor\git" -Recurse -Force
+          $headers = @{ "User-Agent" = "SchoolHub-Build/2.4" }
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/git-for-windows/git/releases/latest" -Headers $headers
+          $asset = $release.assets | Where-Object { $_.name -match '^MinGit-.*-64-bit\.zip$' } | Select-Object -First 1
+          if (-not $asset) { throw "Official 64-bit MinGit asset not found" }
+          Write-Host "Using $($asset.name)"
+          Invoke-WebRequest -Uri $asset.browser_download_url -Headers $headers -OutFile "MinGit.zip"
+          New-Item -ItemType Directory -Force "vendor\git" | Out-Null
+          Expand-Archive -Path "MinGit.zip" -DestinationPath "vendor\git" -Force
           & "vendor\git\cmd\git.exe" --version
-          if ($LASTEXITCODE -ne 0) { throw "Bundled Git failed" }
+          if ($LASTEXITCODE -ne 0) { throw "Bundled MinGit failed" }
 
       - name: Run tests
         shell: pwsh
@@ -223,6 +252,10 @@ jobs:
           python -m PyInstaller --clean --noconfirm SchoolHub.spec
           if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
           if (!(Test-Path "dist\SchoolHub.exe")) { throw "SchoolHub.exe missing" }
+          $size = (Get-Item "dist\SchoolHub.exe").Length
+          $mb = [math]::Round($size / 1MB, 1)
+          Write-Host "SchoolHub.exe size: $mb MB"
+          if ($size -gt 160MB) { throw "UltraLight size budget exceeded: $mb MB" }
 
       - name: Self-test EXE
         shell: pwsh
@@ -237,16 +270,31 @@ jobs:
           if (-not $result.checks.media_streaming) { throw "Media streaming failed" }
           if (-not $result.checks.git_bundled) { throw "Bundled Git failed" }
           if (-not $result.checks.safe_default_remote) { throw "Privacy remote failed" }
-          if ($result.checks.version -ne "2.3.0") { throw "Wrong version" }
+          if ($result.checks.version -ne "2.4.0") { throw "Wrong version" }
 
-      - name: GUI smoke test
+      - name: GUI idle smoke test
         shell: pwsh
         run: |
           $p = Start-Process ".\dist\SchoolHub.exe" -PassThru
-          Start-Sleep -Seconds 10
+          Start-Sleep -Seconds 15
           $p.Refresh()
           if ($p.HasExited) { throw "GUI exited at startup: $($p.ExitCode)" }
-          Stop-Process -Id $p.Id -Force
+
+          $procs = @(Get-Process -Name "SchoolHub" -ErrorAction SilentlyContinue)
+          $mem = ($procs | Measure-Object -Property WorkingSet64 -Sum).Sum
+          $cpu1 = ($procs | Measure-Object -Property CPU -Sum).Sum
+          Start-Sleep -Seconds 5
+          $procs2 = @(Get-Process -Name "SchoolHub" -ErrorAction SilentlyContinue)
+          $cpu2 = ($procs2 | Measure-Object -Property CPU -Sum).Sum
+          $delta = [double]$cpu2 - [double]$cpu1
+          $memMb = [math]::Round(([double]$mem / 1MB), 1)
+          Write-Host "Idle working set: $memMb MB"
+          Write-Host "CPU used over 5s idle window: $([math]::Round($delta, 3)) s"
+
+          if ($mem -gt 200MB) { throw "Idle RAM budget exceeded: $memMb MB" }
+          if ($delta -gt 1.0) { throw "Idle CPU budget exceeded: $delta s over 5s" }
+
+          Get-Process -Name "SchoolHub" -ErrorAction SilentlyContinue | Stop-Process -Force
 
       - name: Checksum
         shell: pwsh
@@ -258,7 +306,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SchoolHub-Windows-OneFile-v2.3.0
+          name: SchoolHub-Windows-OneFile-v2.4.0-UltraLight
           path: |
             dist/SchoolHub.exe
             dist/SchoolHub.exe.sha256.txt
@@ -272,11 +320,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "schoolhub-v2.3.0"
-          $notes = "SchoolHub 2.3.0: splash immediata dal doppio clic, estrazione visibile, grafica e progress UI 2.2 mantenute, cifratura streaming media/file grandi, aggiornamento automatico."
+          $tag = "schoolhub-v2.4.0"
+          $notes = "SchoolHub 2.4.0 UltraLight: CPU idle ridotta, clock a cadenza minima, update silenzioso massimo una volta al giorno, autostart e auto-sync disattivati nella migrazione UltraLight, istanza singola, cryptography caricata solo quando serve, MinGit ufficiale al posto di Git completo, cifratura streaming e protezioni privacy mantenute."
           if (gh release view $tag --repo "$env:GITHUB_REPOSITORY" *> $null) {
             gh release upload $tag ".\dist\SchoolHub.exe#SchoolHub.exe" ".\dist\SchoolHub.exe.sha256.txt#SchoolHub.exe.sha256.txt" --clobber --repo "$env:GITHUB_REPOSITORY"
-            gh release edit $tag --title "SchoolHub 2.3.0" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
+            gh release edit $tag --title "SchoolHub 2.4.0 UltraLight" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
           } else {
-            gh release create $tag ".\dist\SchoolHub.exe#SchoolHub.exe" ".\dist\SchoolHub.exe.sha256.txt#SchoolHub.exe.sha256.txt" --target "$env:GITHUB_SHA" --title "SchoolHub 2.3.0" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
+            gh release create $tag ".\dist\SchoolHub.exe#SchoolHub.exe" ".\dist\SchoolHub.exe.sha256.txt#SchoolHub.exe.sha256.txt" --target "$env:GITHUB_SHA" --title "SchoolHub 2.4.0 UltraLight" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
           }
