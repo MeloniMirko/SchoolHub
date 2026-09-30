@@ -2150,9 +2150,9 @@ class SchoolHub:
 
         tk.Frame(card, bg=BORDER, height=1).pack(fill="x", padx=22, pady=(0,16))
         tk.Label(card, text="SINCRONIZZAZIONE GITHUB", font=("Segoe UI", 9, "bold"), fg=CYAN, bg=PANEL).pack(anchor="w", padx=22, pady=(0,5))
-        tk.Label(card, text="Usa esclusivamente un repository PRIVATO. SchoolHub blocca automaticamente i repository pubblici.", font=("Segoe UI",8), fg=MUTED, bg=PANEL, wraplength=760, justify="left").pack(anchor="w", padx=22, pady=(0,10))
+        tk.Label(card, text="Puoi usare repository PRIVATI o PUBBLICI. Se è pubblico, SchoolHub usa automaticamente il branch schoolhub-encrypted-data e carica solo un payload cifrato.", font=("Segoe UI",8), fg=MUTED, bg=PANEL, wraplength=760, justify="left").pack(anchor="w", padx=22, pady=(0,10))
 
-        tk.Label(card, text="URL REPOSITORY PRIVATO", font=("Segoe UI", 8, "bold"), fg=MUTED, bg=PANEL).pack(anchor="w", padx=22, pady=(0,5))
+        tk.Label(card, text="URL REPOSITORY GITHUB", font=("Segoe UI", 8, "bold"), fg=MUTED, bg=PANEL).pack(anchor="w", padx=22, pady=(0,5))
         self.remote_entry = tk.Entry(card, bg=PANEL2, fg=TEXT, insertbackground=TEXT, relief="flat", font=("Consolas", 9))
         self.remote_entry.pack(fill="x", padx=22, pady=(0, 13), ipady=9)
         self.remote_entry.insert(0, self.remote)
