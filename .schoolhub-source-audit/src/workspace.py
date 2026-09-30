@@ -7,7 +7,15 @@ import shutil
 import struct
 from pathlib import Path
 
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+_AESGCM = None
+
+def _aesgcm():
+    """Lazy-load cryptography only when Vault crypto is actually used."""
+    global _AESGCM
+    if _AESGCM is None:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        _AESGCM = AESGCM
+    return _AESGCM
 
 
 class WorkspaceError(Exception):
@@ -131,7 +139,7 @@ class WorkspaceManager:
 
     def _make_metadata(self, key, salt):
         nonce = secrets.token_bytes(self.NONCE_LEN)
-        verification = AESGCM(key).encrypt(nonce, self.VERIFY_TEXT, self.VERIFY_AAD)
+        verification = _aesgcm()(key).encrypt(nonce, self.VERIFY_TEXT, self.VERIFY_AAD)
         return {
             "version": self.FORMAT_VERSION,
             "kdf": "scrypt",
@@ -180,7 +188,7 @@ class WorkspaceManager:
         nonce = self._unb64(meta["verification_nonce"], "verification_nonce")
         ciphertext = self._unb64(meta["verification"], "verification")
         try:
-            plain = AESGCM(key).decrypt(nonce, ciphertext, self.VERIFY_AAD)
+            plain = _aesgcm()(key).decrypt(nonce, ciphertext, self.VERIFY_AAD)
         except Exception as exc:
             raise WorkspaceError("Password errata o Workspace danneggiato.") from exc
         if plain != self.VERIFY_TEXT:
@@ -297,7 +305,7 @@ class WorkspaceManager:
                         raise WorkspaceError(f"File troppo grande per il formato cifrato: {rel}")
                     nonce = nonce_prefix + counter.to_bytes(4, "big")
                     aad = aad_base + b":chunk:" + counter.to_bytes(4, "big") + b":" + total_size.to_bytes(8, "big")
-                    ciphertext = AESGCM(key).encrypt(nonce, chunk, aad)
+                    ciphertext = _aesgcm()(key).encrypt(nonce, chunk, aad)
                     out.write(struct.pack(">I", len(chunk)))
                     out.write(ciphertext)
                     done += len(chunk)
@@ -344,7 +352,7 @@ class WorkspaceManager:
             nonce = payload[offset:offset + self.NONCE_LEN]
             ciphertext = payload[offset + self.NONCE_LEN:]
             try:
-                plain = AESGCM(key).decrypt(nonce, ciphertext, aad_base)
+                plain = _aesgcm()(key).decrypt(nonce, ciphertext, aad_base)
             except Exception as exc:
                 raise WorkspaceError(f"Impossibile decifrare {rel}: password errata o file danneggiato.") from exc
             try:
@@ -388,7 +396,7 @@ class WorkspaceManager:
                     nonce = nonce_prefix + counter.to_bytes(4, "big")
                     aad = aad_base + b":chunk:" + counter.to_bytes(4, "big") + b":" + total_size.to_bytes(8, "big")
                     try:
-                        plain = AESGCM(key).decrypt(nonce, ciphertext, aad)
+                        plain = _aesgcm()(key).decrypt(nonce, ciphertext, aad)
                     except Exception as exc:
                         raise WorkspaceError(f"Impossibile decifrare {rel}: password errata o file danneggiato.") from exc
                     out.write(plain)
@@ -421,7 +429,7 @@ class WorkspaceManager:
             if len(payload) < len(self.FILE_MAGIC_V1) + self.NONCE_LEN + 16:
                 raise WorkspaceError(f"File cifrato non valido: {rel}")
             off = len(self.FILE_MAGIC_V1)
-            AESGCM(key).decrypt(payload[off:off+self.NONCE_LEN], payload[off+self.NONCE_LEN:], aad_base)
+            _aesgcm()(key).decrypt(payload[off:off+self.NONCE_LEN], payload[off+self.NONCE_LEN:], aad_base)
             return
         if magic != self.FILE_MAGIC:
             raise WorkspaceError(f"Formato file non riconosciuto: {rel}")
@@ -447,7 +455,7 @@ class WorkspaceManager:
                     raise WorkspaceError(f"File cifrato troncato: {rel}")
                 nonce = nonce_prefix + counter.to_bytes(4, "big")
                 aad = aad_base + b":chunk:" + counter.to_bytes(4, "big") + b":" + total_size.to_bytes(8, "big")
-                plain = AESGCM(key).decrypt(nonce, ciphertext, aad)
+                plain = _aesgcm()(key).decrypt(nonce, ciphertext, aad)
                 if len(plain) != plain_len:
                     raise WorkspaceError(f"Blocco cifrato non valido: {rel}")
                 done += plain_len
