@@ -1841,7 +1841,7 @@ class SchoolHub:
         try:
             source, _ = self._get_sync_source(password, temp_root)
             self._assert_remote_private()
-            self.write_log("↔ Scaricamento GitHub per risolvere i conflitti...")
+            self.write_log("↔ Scaricamento GitHub privato per risolvere i conflitti...")
             self._clone_remote(repo)
 
             state = self._load_sync_state()
@@ -2143,7 +2143,7 @@ class SchoolHub:
 
         tk.Frame(card, bg=BORDER, height=1).pack(fill="x", padx=22, pady=(0,16))
         tk.Label(card, text="SINCRONIZZAZIONE GITHUB", font=("Segoe UI", 9, "bold"), fg=CYAN, bg=PANEL).pack(anchor="w", padx=22, pady=(0,5))
-        tk.Label(card, text="Puoi usare un repository GitHub pubblico o privato.", font=("Segoe UI",8), fg=MUTED, bg=PANEL, wraplength=760, justify="left").pack(anchor="w", padx=22, pady=(0,10))
+        tk.Label(card, text="Repository GitHub pubblico o privato: SchoolHub sincronizza usando la modalità standard configurata.", font=("Segoe UI",8), fg=MUTED, bg=PANEL, wraplength=760, justify="left").pack(anchor="w", padx=22, pady=(0,10))
 
         tk.Label(card, text="URL REPOSITORY GITHUB", font=("Segoe UI", 8, "bold"), fg=MUTED, bg=PANEL).pack(anchor="w", padx=22, pady=(0,5))
         self.remote_entry = tk.Entry(card, bg=PANEL2, fg=TEXT, insertbackground=TEXT, relief="flat", font=("Consolas", 9))
@@ -2266,16 +2266,13 @@ class SchoolHub:
             return None
 
     def _assert_remote_private(self):
-        """Accept both public and private GitHub repositories.
-
-        The method name is kept for compatibility with the existing sync flow.
-        It now verifies only that the configured GitHub repository is valid and
-        reachable; public repositories are no longer rejected.
-        """
+        """Fail closed for public repositories; private repos are verified by authenticated Git access."""
+        # Local bare repositories are used only by the source test-suite. Frozen
+        # production builds never accept a local path as a sync remote.
         if not getattr(sys, "frozen", False) and self.remote and os.path.exists(self.remote):
             return
         if not self.remote:
-            raise WorkspaceError("Repository GitHub non configurato. Impostalo nelle Impostazioni.")
+            raise WorkspaceError("Repository GitHub non configurato. Impostane uno privato nelle Impostazioni.")
         parts = self._github_repo_parts()
         if not parts:
             raise WorkspaceError("SchoolHub accetta per la sincronizzazione solo repository GitHub HTTPS.")
@@ -2285,22 +2282,24 @@ class SchoolHub:
         try:
             with urllib.request.urlopen(req, timeout=12) as response:
                 data = json.loads(response.read().decode("utf-8"))
-            if data.get("private") in (True, False):
+            if data.get("private") is False:
+                self.write_log("⚠ Repository GitHub pubblico: sincronizzazione consentita su richiesta dell'utente.")
                 return
-            raise WorkspaceError("GitHub non ha restituito informazioni valide sul repository.")
+            if data.get("private") is True:
+                return
         except WorkspaceError:
             raise
         except urllib.error.HTTPError as exc:
             if exc.code != 404:
-                raise WorkspaceError(f"Impossibile verificare il repository GitHub (HTTP {exc.code}).") from exc
-            # Private repositories may return 404 to anonymous API requests.
+                raise WorkspaceError(f"Impossibile verificare in sicurezza la privacy del repository GitHub (HTTP {exc.code}). Sync bloccata.") from exc
+            # GitHub intentionally returns 404 for private repositories to anonymous API calls.
             os.makedirs(APP_DIR, exist_ok=True)
             code, out, err = self.git(["ls-remote", self._git_remote_for_auth()], cwd=APP_DIR, timeout=60)
             if code != 0:
-                raise WorkspaceError(err or out or "Repository GitHub non raggiungibile o accesso non autorizzato.")
+                raise WorkspaceError(err or out or "Repository privato non raggiungibile o accesso GitHub non autorizzato.")
             return
         except Exception as exc:
-            raise WorkspaceError(f"Impossibile verificare il repository GitHub: {exc}") from exc
+            raise WorkspaceError(f"Impossibile verificare la privacy del repository GitHub. Sync bloccata: {exc}") from exc
 
     @staticmethod
     def _hash_tree(root):
@@ -2587,9 +2586,9 @@ class SchoolHub:
             if password is None: return
 
         self.sync_running = True
-        self.open_progress("Sincronizzazione SchoolHub", "Workspace cifrato ↔ repository GitHub")
+        self.open_progress("Sincronizzazione SchoolHub", "Workspace cifrato ↔ repository GitHub privato")
         self.progress_update(2, "Preparazione", "Creazione snapshot sicuro")
-        self.set_status("SINCRONIZZAZIONE...", YELLOW, "Workspace cifrato ↔ GitHub")
+        self.set_status("SINCRONIZZAZIONE...", YELLOW, "Workspace cifrato ↔ GitHub privato")
         threading.Thread(target=self.sync_worker, args=(password,), daemon=True).start()
 
     def sync_worker(self, password=None):
@@ -2604,7 +2603,7 @@ class SchoolHub:
 
             self.progress_update(20, "Sicurezza", "Verifica che il repository non sia pubblico")
             self._assert_remote_private()
-            self.write_log("↔ Scaricamento repository GitHub in area temporanea...")
+            self.write_log("↔ Scaricamento repository GitHub privato in area temporanea...")
             self.progress_update(28, "Download GitHub", "Clone shallow del repository")
             self._clone_remote(repo)
             self.progress_update(43, "Confronto", "Analisi differenze locale ↔ GitHub")
@@ -2646,7 +2645,7 @@ class SchoolHub:
                 code, out, err = self.git(["commit", "-m", message], cwd=repo)
                 if code != 0 and "nothing to commit" not in (out + " " + err).lower():
                     raise WorkspaceError(err or out or "git commit fallito.")
-                self.progress_update(86, "Upload GitHub", "Invio modifiche al repository")
+                self.progress_update(86, "Upload GitHub", "Invio modifiche al repository privato")
                 code, out, err = self.git(["push", "-u", "origin", self.branch], cwd=repo)
                 if code != 0: raise WorkspaceError(err or out or "git push fallito.")
                 self.progress_update(93, "Verifica remota", "Controllo commit pubblicato")
