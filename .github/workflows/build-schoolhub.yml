@@ -216,6 +216,9 @@ jobs:
               'single instance': 'def _acquire_single_instance()' in gui,
               'instant unlock UI': 'def workspace_session_lock' in gui,
               'instant unlock core': 'def session_lock' in workspace and 'if self.has_plaintext:' in workspace,
+              'public encrypted branch': 'PUBLIC_DATA_BRANCH = "schoolhub-encrypted-data"' in gui,
+              'public encrypted pack': 'def _public_remote_pack' in gui and 'payload.part' in gui,
+              'public encrypted unpack': 'def _public_remote_unpack' in gui,
               'lazy crypto': 'def _aesgcm()' in workspace and 'AESGCM(key)' not in workspace,
               'lean hidden imports': 'hiddenimports = []' in spec,
               'boot splash': 'Splash(' in spec and 'splash.binaries' in spec,
@@ -271,6 +274,8 @@ jobs:
           if (-not $result.checks.vault_roundtrip) { throw "Vault failed" }
           if (-not $result.checks.media_streaming) { throw "Media streaming failed" }
           if (-not $result.checks.legacy_stream_unlock) { throw "Legacy SHENC1 streaming unlock failed" }
+          if (-not $result.checks.public_encrypted_transport) { throw "Public encrypted transport failed" }
+          if (-not $result.checks.public_names_hidden) { throw "Public filename privacy failed" }
           if (-not $result.checks.git_bundled) { throw "Bundled Git failed" }
           if (-not $result.checks.safe_default_remote) { throw "Privacy remote failed" }
           if ($result.checks.version -ne "2.4.3") { throw "Wrong version" }
