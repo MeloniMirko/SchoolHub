@@ -35,7 +35,7 @@ jobs:
           if ($actual -ne "11a25bb9e4b54868a2754b15d3c665b5384fb24cc06946a3fb0f29af6f135ba8") { throw "Source hash mismatch" }
           tar -xf "source.tar.xz"
 
-      - name: Apply SchoolHub 2.4.4 Public Repo Fix source
+      - name: Apply SchoolHub 2.4.4 Simple Public Sync source
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -309,7 +309,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SchoolHub-Windows-OneFile-v2.4.4-PublicRepoFix
+          name: SchoolHub-Windows-OneFile-v2.4.4-SimplePublic
           path: |
             dist/SchoolHub.exe
             dist/SchoolHub.exe.sha256.txt
@@ -324,10 +324,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "schoolhub-v2.4.4"
-          $notes = "SchoolHub 2.4.4 Public Repo Fix: sincronizzazione standard della 2.4.2 con repository GitHub pubblici consentiti. Mantiene Instant Unlock, fix legacy, MinGit e test di integrita."
+          $notes = "SchoolHub 2.4.4 Simple Public Sync: ripristina la sincronizzazione standard della 2.4.2 e consente anche repository GitHub pubblici senza bloccare la sync. Mantiene Instant Unlock, fix SHENC1 legacy, MinGit e test di integrità."
           if (gh release view $tag --repo "$env:GITHUB_REPOSITORY" *> $null) {
             gh release upload $tag ".\dist\SchoolHub.exe#SchoolHub.exe" ".\dist\SchoolHub.exe.sha256.txt#SchoolHub.exe.sha256.txt" --clobber --repo "$env:GITHUB_REPOSITORY"
-            gh release edit $tag --title "SchoolHub 2.4.4 Public Repo Fix" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
+            gh release edit $tag --title "SchoolHub 2.4.4 Simple Public Sync" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
           } else {
-            gh release create $tag ".\dist\SchoolHub.exe#SchoolHub.exe" ".\dist\SchoolHub.exe.sha256.txt#SchoolHub.exe.sha256.txt" --target "$env:GITHUB_SHA" --title "SchoolHub 2.4.4 Public Repo Fix" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
+            gh release create $tag ".\dist\SchoolHub.exe#SchoolHub.exe" ".\dist\SchoolHub.exe.sha256.txt#SchoolHub.exe.sha256.txt" --target "$env:GITHUB_SHA" --title "SchoolHub 2.4.4 Simple Public Sync" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
           }
