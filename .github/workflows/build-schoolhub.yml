@@ -254,8 +254,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           $headers = @{ "User-Agent" = "SchoolHub-Build/2.4" }
           $release = Invoke-RestMethod -Uri "https://api.github.com/repos/git-ecosystem/git-credential-manager/releases/latest" -Headers $headers
-          $asset = $release.assets | Where-Object { $_.name -match '^gcm-win-x64-.*\.zip
-      - name: Run tests
+          $asset = $release.assets | Where-Object { $_.name -match '^gcm-win-x64-.*[.]zip      - name: Run tests
         shell: pwsh
         run: |
           python -m unittest discover -s tests -v
@@ -338,7 +337,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "schoolhub-v2.4.6"
-          $notes = "SchoolHub 2.4.6 Sync + Autostart Fix: corregge il riavvio dopo aggiornamento dei build PyInstaller one-file, aspettando la chiusura completa della vecchia istanza e avviando la nuova con ambiente PyInstaller pulito. Mantiene Simple Public Sync, Instant Unlock, fix SHENC1 legacy, MinGit e test di integrità."
+          $notes = "SchoolHub 2.4.6 Sync + Autostart Fix: conserva il repository pubblico configurato, verifica realmente l’avvio automatico Windows, rimanda la sync automatica finché il Workspace viene sbloccato e include Git Credential Manager per autenticare il push GitHub via browser. Mantiene il fix updater 2.4.5, Instant Unlock e fix SHENC1 legacy."
           if (gh release view $tag --repo "$env:GITHUB_REPOSITORY" *> $null) {
             gh release upload $tag ".\dist\SchoolHub.exe#SchoolHub.exe" ".\dist\SchoolHub.exe.sha256.txt#SchoolHub.exe.sha256.txt" --clobber --repo "$env:GITHUB_REPOSITORY"
             gh release edit $tag --title "SchoolHub 2.4.6 Sync + Autostart Fix" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
