@@ -329,7 +329,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "schoolhub-v2.4.3"
-          $notes = "SchoolHub 2.4.3: Instant Unlock più fix dei Vault legacy SHENC1. I vecchi file grandi vengono decifrati in streaming con avanzamento reale, senza caricare l’intero file in RAM. Mantiene Blocca rapido, Cifra e chiudi, MinGit, cifratura streaming e protezioni privacy."
+          $notes = "SchoolHub 2.4.3 Public Encrypted Sync: supporta repository GitHub pubblici sul branch schoolhub-encrypted-data. SchoolHub impacchetta il Workspace, cifra il payload con SHENC2 e lo suddivide in chunk sotto il limite GitHub; file e nomi originali non vengono inseriti nel branch pubblico. Mantiene Instant Unlock, fix SHENC1 legacy, MinGit e verifiche di integrità."
           if (gh release view $tag --repo "$env:GITHUB_REPOSITORY" *> $null) {
             gh release upload $tag ".\dist\SchoolHub.exe#SchoolHub.exe" ".\dist\SchoolHub.exe.sha256.txt#SchoolHub.exe.sha256.txt" --clobber --repo "$env:GITHUB_REPOSITORY"
             gh release edit $tag --title "SchoolHub 2.4.3 Public Encrypted Sync" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
