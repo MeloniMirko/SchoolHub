@@ -28,9 +28,9 @@ CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 LOG_FILE = os.path.join(APP_DIR, "schoolhub.log")
 SYNC_STATE_FILE = os.path.join(APP_DIR, "sync_state.json")
 
-APP_VERSION = "2.4.0"
+APP_VERSION = "2.4.1"
 RELEASE_API = "https://api.github.com/repos/MeloniMirko/Scuola/releases/latest"
-UPDATE_USER_AGENT = "SchoolHub-Updater/2.4"
+UPDATE_USER_AGENT = "SchoolHub-Updater/2.4.1"
 UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 UPDATE_STAMP_FILE = os.path.join(APP_DIR, "last_update_check.txt")
 GIT_TIMEOUT_SECONDS = 180
@@ -1448,7 +1448,7 @@ class SchoolHub:
             card,
             text="WORKSPACE SBLOCCATO"
             if is_unlocked
-            else "WORKSPACE BLOCCATO",
+            else ("BLOCCO RAPIDO" if getattr(self.workspace, "has_plaintext", False) else "WORKSPACE BLOCCATO"),
             font=("Segoe UI", 16, "bold"),
             fg=GREEN if is_unlocked else TEXT,
             bg=PANEL
@@ -1515,7 +1515,7 @@ class SchoolHub:
                 card,
                 text=(
                     "I file sono disponibili in forma leggibile.\n"
-                    "Quando hai finito, blocca il Workspace."
+                    "Blocco rapido = riapertura immediata; Cifra e chiudi = massima protezione."
                 ),
                 font=("Segoe UI", 9),
                 fg=MUTED,
@@ -1554,7 +1554,25 @@ class SchoolHub:
 
             tk.Button(
                 buttons,
-                text="🔒  BLOCCA",
+                text="⚡  BLOCCA RAPIDO",
+                command=self.workspace_session_lock,
+                bg=YELLOW,
+                fg=BG,
+                activebackground=YELLOW,
+                relief="flat",
+                bd=0,
+                font=("Segoe UI", 10, "bold"),
+                cursor="hand2",
+                padx=18,
+                pady=12
+            ).pack(
+                side="left",
+                padx=5
+            )
+
+            tk.Button(
+                buttons,
+                text="🔒  CIFRA E CHIUDI",
                 command=self.workspace_lock,
                 bg=RED,
                 fg="white",
@@ -1563,7 +1581,7 @@ class SchoolHub:
                 bd=0,
                 font=("Segoe UI", 10, "bold"),
                 cursor="hand2",
-                padx=20,
+                padx=18,
                 pady=12
             ).pack(
                 side="left",
@@ -1576,9 +1594,13 @@ class SchoolHub:
 
         else:
 
+            fast_locked = bool(getattr(self.workspace, "has_plaintext", False))
             tk.Label(
                 card,
                 text=(
+                    "Blocco rapido attivo: i file sono già sul disco.\n"
+                    "Inserisci la password: lo sblocco sarà quasi immediato."
+                    if fast_locked else
                     "Il contenuto è cifrato.\n"
                     "Inserisci la password per renderlo disponibile."
                 ),
@@ -1694,11 +1716,29 @@ class SchoolHub:
                 self.workspace_busy = False
         threading.Thread(target=worker, daemon=True).start()
 
+    def workspace_session_lock(self):
+        if self.workspace_busy or self.sync_running:
+            messagebox.showinfo("SchoolHub", "È già in corso un'operazione sul Workspace. Attendi che termini.", parent=self.root)
+            return
+        if not self.workspace.is_unlocked:
+            return
+        if not messagebox.askyesno(
+            "Blocco rapido",
+            "SchoolHub dimenticherà la chiave della sessione, ma i file resteranno leggibili sul disco.\n\n"
+            "Il prossimo sblocco sarà quasi immediato dopo la verifica password.\n"
+            "Per protezione completa usa 'Cifra e chiudi'.\n\nContinuare?",
+            parent=self.root,
+        ):
+            return
+        self.workspace.session_lock()
+        self.write_log("⚡ Blocco rapido: chiave rimossa dalla memoria, file locali mantenuti.")
+        self.navigate("Workspace")
+
     def workspace_lock(self):
         if self.workspace_busy or self.sync_running:
             messagebox.showinfo("SchoolHub", "È già in corso un'operazione sul Workspace. Attendi che termini.", parent=self.root)
             return
-        password = self.ask_password("Blocca Workspace", "Conferma la password prima di cifrare e rimuovere la copia leggibile.")
+        password = self.ask_password("Blocca Workspace", "Conferma la password per cifrare tutto e rimuovere la copia leggibile.")
         if password is None:
             return
         if not messagebox.askyesno("Blocca Workspace", "Il Workspace verrà cifrato e la copia leggibile verrà rimossa solo dopo la verifica completa.\n\nContinuare?", parent=self.root):
@@ -1706,7 +1746,7 @@ class SchoolHub:
         self.workspace_busy = True
         self.open_progress("Blocco Workspace", "Cifratura, verifica e chiusura sicura")
         self.progress_update(2, "Preparazione", "Controllo dei file aperti")
-        self.write_log("🔒 Avvio blocco Workspace.")
+        self.write_log("🔒 Avvio Cifra e chiudi.")
         def worker():
             try:
                 self.workspace.lock(password, progress=self.workspace_progress_callback(3, 98))
@@ -3183,6 +3223,17 @@ def _frozen_self_test(output_path):
                 raise RuntimeError("Vault round-trip non valido")
         if os.path.getsize(os.path.join(ws, "selftest.mp4")) < 4_000_000:
             raise RuntimeError("Round-trip media non valido")
+
+        wm.session_lock()
+        if wm.is_unlocked or not wm.has_plaintext:
+            raise RuntimeError("Blocco rapido non valido")
+        fast_started = time.monotonic()
+        wm.unlock(password)
+        fast_elapsed = time.monotonic() - fast_started
+        if not wm.is_unlocked:
+            raise RuntimeError("Sblocco rapido non valido")
+        result["checks"]["instant_unlock_seconds"] = round(fast_elapsed, 3)
+
         wm.lock(password)
         result["checks"]["vault_roundtrip"] = True
         result["checks"]["media_streaming"] = True
