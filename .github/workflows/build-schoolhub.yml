@@ -217,6 +217,11 @@ jobs:
               'updater clean restart': 'wait_old_process' in gui and 'RESET_ENVIRONMENT' in gui,
               'instant unlock UI': 'def workspace_session_lock' in gui,
               'instant unlock core': 'def session_lock' in workspace and 'if self.has_plaintext:' in workspace,
+              'public remote preserved': 'Preserve the repository explicitly saved by the user' in gui,
+              'verified windows startup': 'Windows non ha confermato il comando di avvio automatico' in gui,
+              'pending autosync after unlock': 'def _auto_sync_after_unlock' in gui,
+              'gcm runtime config': 'GCM_INTERACTIVE' in gui and 'credential.helper' in gui,
+              'gcm bundled in spec': '("vendor/gcm", "vendor/gcm")' in spec,
               'lazy crypto': 'def _aesgcm()' in workspace and 'AESGCM(key)' not in workspace,
               'lean hidden imports': 'hiddenimports = []' in spec,
               'boot splash': 'Splash(' in spec and 'splash.binaries' in spec,
@@ -280,6 +285,7 @@ jobs:
           if (-not $result.checks.media_streaming) { throw "Media streaming failed" }
           if (-not $result.checks.legacy_stream_unlock) { throw "Legacy SHENC1 streaming unlock failed" }
           if (-not $result.checks.git_bundled) { throw "Bundled Git failed" }
+          if (-not $result.checks.git_credential_manager) { throw "Git Credential Manager failed" }
           if (-not $result.checks.safe_default_remote) { throw "Privacy remote failed" }
           if ($result.checks.version -ne "2.4.6") { throw "Wrong version" }
 
