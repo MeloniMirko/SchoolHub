@@ -2429,6 +2429,151 @@ class SchoolHub:
             if code != 0:
                 raise WorkspaceError(err2 or out2 or f"Impossibile inizializzare il branch {branch}.")
 
+    def _safe_extract_tar(self, tar_path, destination):
+        os.makedirs(destination, exist_ok=True)
+        base = os.path.abspath(destination)
+        with tarfile.open(tar_path, "r") as tf:
+            for member in tf.getmembers():
+                name = member.name.replace("\\", "/")
+                if not name or name.startswith("/") or ".." in name.split("/"):
+                    raise WorkspaceError("Archivio remoto cifrato non valido: percorso non sicuro.")
+                if member.issym() or member.islnk() or member.isdev():
+                    raise WorkspaceError("Archivio remoto cifrato non valido: collegamento/dispositivo non consentito.")
+                target = os.path.abspath(os.path.join(base, *name.split("/")))
+                try:
+                    if os.path.commonpath([base, target]) != base:
+                        raise WorkspaceError("Archivio remoto cifrato non valido: path traversal.")
+                except ValueError as exc:
+                    raise WorkspaceError("Archivio remoto cifrato non valido.") from exc
+            tf.extractall(base, filter="data")
+
+    def _public_remote_unpack(self, repo, password, temp_root):
+        """Decrypt the public-repository payload into a private temporary tree."""
+        out = os.path.join(temp_root, "public-remote-plain")
+        os.makedirs(out, exist_ok=True)
+        container = os.path.join(repo, PUBLIC_CONTAINER_DIR)
+        meta = os.path.join(container, "vault.json")
+        manifest_path = os.path.join(container, "manifest.json")
+        if not os.path.isfile(meta) and not os.path.isfile(manifest_path):
+            return out
+        if not os.path.isfile(meta) or not os.path.isfile(manifest_path):
+            raise WorkspaceError("Dati SchoolHub pubblici incompleti o danneggiati.")
+
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as fh:
+                manifest = json.load(fh)
+            parts = manifest.get("parts")
+            expected_hash = str(manifest.get("sha256") or "").lower()
+            expected_size = int(manifest.get("encrypted_size") or 0)
+            if manifest.get("format") != 1 or not isinstance(parts, list) or not parts:
+                raise ValueError("manifest")
+            if not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+                raise ValueError("hash")
+        except Exception as exc:
+            raise WorkspaceError("Manifest del Vault pubblico non valido.") from exc
+
+        encrypted = os.path.join(temp_root, "public-payload.shenc")
+        h = hashlib.sha256()
+        total = 0
+        with open(encrypted, "wb") as dst:
+            for name in parts:
+                if not isinstance(name, str) or not re.fullmatch(r"payload\.part\d{3,6}", name):
+                    raise WorkspaceError("Manifest del Vault pubblico contiene un blocco non valido.")
+                part_path = os.path.join(container, name)
+                if not os.path.isfile(part_path):
+                    raise WorkspaceError(f"Manca un blocco del Vault pubblico: {name}")
+                with open(part_path, "rb") as src:
+                    while True:
+                        chunk = src.read(4 * 1024 * 1024)
+                        if not chunk:
+                            break
+                        dst.write(chunk)
+                        h.update(chunk)
+                        total += len(chunk)
+        if total != expected_size or h.hexdigest() != expected_hash:
+            raise WorkspaceError("Integrità del Vault pubblico non valida.")
+
+        remote_manager = WorkspaceManager(os.path.join(temp_root, "_unused-public"), container)
+        key = remote_manager._verify_password(password)
+        tar_path = os.path.join(temp_root, "public-remote.tar")
+        remote_manager._decrypt_file(encrypted, tar_path, key, Path("payload.tar"))
+        self._safe_extract_tar(tar_path, out)
+        return out
+
+    def _public_remote_pack(self, source, repo, password, temp_root):
+        """Write only opaque encrypted chunks to the dedicated public data branch."""
+        container = os.path.join(repo, PUBLIC_CONTAINER_DIR)
+        old_meta = None
+        old_meta_path = os.path.join(container, "vault.json")
+        if os.path.isfile(old_meta_path):
+            with open(old_meta_path, "rb") as fh:
+                old_meta = fh.read()
+
+        for name in os.listdir(repo):
+            if name == ".git":
+                continue
+            path = os.path.join(repo, name)
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+            else:
+                os.unlink(path)
+        os.makedirs(container, exist_ok=True)
+
+        remote_manager = WorkspaceManager(os.path.join(temp_root, "_unused-pack"), container)
+        meta_path = os.path.join(container, "vault.json")
+        if old_meta:
+            with open(meta_path, "wb") as fh:
+                fh.write(old_meta)
+            key = remote_manager._verify_password(password)
+        else:
+            shutil.copy2(self.workspace.meta_path, meta_path)
+            key = remote_manager._verify_password(password)
+
+        tar_path = os.path.join(temp_root, "public-upload.tar")
+        with tarfile.open(tar_path, "w") as tf:
+            base = os.path.abspath(source)
+            for current, dirs, files in os.walk(base, followlinks=False):
+                dirs[:] = [d for d in dirs if d != ".git" and not os.path.islink(os.path.join(current, d))]
+                for name in files:
+                    fp = os.path.join(current, name)
+                    if os.path.islink(fp):
+                        raise WorkspaceError("Collegamenti simbolici non consentiti nel payload pubblico.")
+                    rel = os.path.relpath(fp, base).replace("\\", "/")
+                    tf.add(fp, arcname=rel, recursive=False)
+
+        encrypted = os.path.join(temp_root, "public-upload.shenc")
+        remote_manager._encrypt_file(tar_path, encrypted, key, Path("payload.tar"))
+
+        h = hashlib.sha256()
+        size = 0
+        parts = []
+        with open(encrypted, "rb") as src:
+            index = 0
+            while True:
+                chunk = src.read(PUBLIC_CHUNK_SIZE)
+                if not chunk:
+                    break
+                name = f"payload.part{index:03d}"
+                with open(os.path.join(container, name), "wb") as dst:
+                    dst.write(chunk)
+                h.update(chunk)
+                size += len(chunk)
+                parts.append(name)
+                index += 1
+        if not parts:
+            raise WorkspaceError("Payload cifrato pubblico vuoto.")
+
+        manifest = {
+            "format": 1,
+            "cipher": "SchoolHub-SHENC2",
+            "encrypted_size": size,
+            "sha256": h.hexdigest(),
+            "parts": parts,
+        }
+        with open(os.path.join(container, "manifest.json"), "w", encoding="utf-8") as fh:
+            json.dump(manifest, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+
     def _get_sync_source(self, password, temp_root):
         """Create a stable plaintext snapshot used for the whole sync operation."""
         source = os.path.join(temp_root, "workspace-snapshot")
