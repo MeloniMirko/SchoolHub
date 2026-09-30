@@ -1793,87 +1793,88 @@ class SchoolHub:
             messagebox.showerror("Workspace", f"Impossibile aprire il Workspace:\n{e}")
 
     def _resolve_conflict(self, choice):
-        """Resolve all currently conflicting files in one explicit operation.
-        choice='local' keeps the encrypted Workspace version.
-        choice='remote' keeps the GitHub version.
-        """
+        """Resolve all currently conflicting files in one explicit operation."""
         if not self.git_enabled:
             return
-
         if self.sync_running:
             messagebox.showinfo("SchoolHub", "Una sincronizzazione è già in corso.")
             return
         if self.workspace_busy:
             messagebox.showinfo("SchoolHub", "È in corso un'operazione sul Workspace. Attendi che termini.")
             return
-
-        password = None
         if not self.workspace.exists:
             messagebox.showwarning("Workspace", "Workspace cifrato non trovato.")
             return
 
-        if not self.workspace.is_unlocked:
-            password = self.ask_password("Password Workspace", "Inserisci la password del Workspace per risolvere i conflitti.")
-            if password is None:
-                return
+        password = self.ask_password(
+            "Password Workspace",
+            "Inserisci la password del Workspace per risolvere i conflitti anche sui repository pubblici cifrati."
+        )
+        if password is None:
+            return
 
         if choice == "local":
             question = (
                 "Vuoi usare il Workspace come versione definitiva?\n\n"
-                "I file in conflitto su GitHub verranno sostituiti "
-                "dalla copia locale e verrà creato un nuovo commit."
+                "I file in conflitto su GitHub verranno sostituiti dalla copia locale."
             )
         else:
             question = (
                 "Vuoi usare GitHub come versione definitiva?\n\n"
-                "I file in conflitto locali verranno sostituiti "
-                "dalla copia presente su GitHub."
+                "I file in conflitto locali verranno sostituiti dalla copia presente su GitHub."
             )
-
         if not messagebox.askyesno("Risolvi conflitti", question, parent=self.root):
             return
 
         self.sync_running = True
         self.set_status("RISOLUZIONE CONFLITTI...", YELLOW, "Operazione esplicita richiesta")
-        threading.Thread(
-            target=self._resolve_conflict_worker,
-            args=(choice, password),
-            daemon=True
-        ).start()
+        threading.Thread(target=self._resolve_conflict_worker, args=(choice, password), daemon=True).start()
 
     def _resolve_conflict_worker(self, choice, password):
         temp_root = tempfile.mkdtemp(prefix="schoolhub-conflict-")
         repo = os.path.join(temp_root, "repo")
         try:
             source, _ = self._get_sync_source(password, temp_root)
-            self._assert_remote_private()
-            self.write_log("↔ Scaricamento GitHub privato per risolvere i conflitti...")
-            self._clone_remote(repo)
+            visibility = self._remote_visibility()
+            data_branch = PUBLIC_DATA_BRANCH if visibility == "public" else self.branch
+
+            self.write_log(
+                "🔐 Risoluzione conflitti sul payload pubblico cifrato..."
+                if visibility == "public"
+                else "↔ Risoluzione conflitti sul repository privato..."
+            )
+            self._clone_remote(repo, branch=data_branch)
+
+            if visibility == "public":
+                remote_tree = self._public_remote_unpack(repo, password, temp_root)
+            else:
+                remote_tree = repo
 
             state = self._load_sync_state()
             baseline = state.get("files", {}) if state is not None else {}
             local_files = self._hash_tree(source)
-            remote_files = self._hash_tree(repo)
+            remote_files = self._hash_tree(remote_tree)
             local_only, remote_only, conflicts = self._classify_changes(baseline, local_files, remote_files)
             if not conflicts:
                 self.last_conflicts = []
-                raise WorkspaceError("Non risultano più conflitti. Aggiorna lo stato e sincronizza normalmente.")
+                raise WorkspaceError("Non risultano più conflitti. Sincronizza normalmente.")
 
-            # Start from GitHub. Preserve independent local changes, and apply the
-            # conflicting local paths only when the user explicitly chose Workspace.
             paths_to_take_local = set(local_only)
             if choice == "local":
                 paths_to_take_local.update(conflicts)
 
             if self.workspace.is_unlocked and self._hash_tree(self.workspace.get_unlocked_path()) != local_files:
                 raise WorkspaceError(
-                    "Il Workspace è stato modificato durante la risoluzione. Nessun file viene sovrascritto: aggiorna i conflitti e riprova."
+                    "Il Workspace è stato modificato durante la risoluzione. Nessun file viene sovrascritto: riprova."
                 )
 
             if paths_to_take_local:
-                self._apply_paths(source, repo, local_files, paths_to_take_local)
+                self._apply_paths(source, remote_tree, local_files, paths_to_take_local)
 
-            self._persist_sync_tree(repo, password, temp_root)
+            self._persist_sync_tree(remote_tree, password, temp_root)
+
+            if visibility == "public":
+                self._public_remote_pack(remote_tree, repo, password, temp_root)
 
             self._ensure_git_identity(repo)
             code, _, err = self.git(["add", "-A"], cwd=repo)
@@ -1882,12 +1883,12 @@ class SchoolHub:
             code, out, err = self.git(["commit", "-m", "SchoolHub: risoluzione conflitti"], cwd=repo)
             if code != 0 and "nothing to commit" not in (out + " " + err).lower():
                 raise WorkspaceError(err or out or "git commit fallito.")
-            code, out, err = self.git(["push", "-u", "origin", self.branch], cwd=repo)
+            code, out, err = self.git(["push", "-u", "origin", data_branch], cwd=repo)
             if code != 0:
                 raise WorkspaceError(err or out or "git push fallito.")
-            self._verify_remote_head(repo)
+            self._verify_remote_head(repo, branch=data_branch)
 
-            final_files = self._hash_tree(repo)
+            final_files = self._hash_tree(remote_tree)
             self._save_sync_state(final_files)
             self.last_conflicts = []
             if choice == "local":
@@ -1896,9 +1897,9 @@ class SchoolHub:
             else:
                 self.write_log(f"✓ Conflitti risolti: mantenuto GitHub per {len(conflicts)} file.")
                 self.finish_status("SINCRONIZZATO", GREEN, "Conflitti risolti: mantenuto GitHub")
-        except Exception as e:
-            self.write_log(f"✕ Risoluzione conflitti fallita: {e}")
-            self.finish_status("ERRORE", RED, str(e))
+        except Exception as exc:
+            self.write_log(f"✕ Risoluzione conflitti fallita: {exc}")
+            self.finish_status("ERRORE", RED, str(exc))
         finally:
             shutil.rmtree(temp_root, ignore_errors=True)
             self.sync_running = False
