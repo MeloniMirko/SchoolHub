@@ -28,9 +28,9 @@ CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 LOG_FILE = os.path.join(APP_DIR, "schoolhub.log")
 SYNC_STATE_FILE = os.path.join(APP_DIR, "sync_state.json")
 
-APP_VERSION = "2.4.5"
+APP_VERSION = "2.4.6"
 RELEASE_API = "https://api.github.com/repos/MeloniMirko/Scuola/releases/latest"
-UPDATE_USER_AGENT = "SchoolHub-Updater/2.4.5"
+UPDATE_USER_AGENT = "SchoolHub-Updater/2.4.6"
 UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 UPDATE_STAMP_FILE = os.path.join(APP_DIR, "last_update_check.txt")
 GIT_TIMEOUT_SECONDS = 180
@@ -57,11 +57,26 @@ def bundled_git_info():
         root = os.path.abspath(root)
         git_exe = os.path.join(root, "cmd", "git.exe")
         if os.path.isfile(git_exe):
+            vendor_root = os.path.dirname(root)
+            gcm_root = os.path.join(vendor_root, "gcm")
+            gcm_exe = os.path.join(gcm_root, "git-credential-manager.exe")
             path_parts = [
                 os.path.join(root, "cmd"),
                 os.path.join(root, "mingw64", "bin"),
                 os.path.join(root, "usr", "bin"),
             ]
+            if os.path.isfile(gcm_exe):
+                path_parts.append(gcm_root)
+                # GCM can open the GitHub browser/device authentication even
+                # though SchoolHub launches git without a console window.
+                env["GCM_INTERACTIVE"] = "always"
+                env["GCM_GUI_PROMPT"] = "1"
+                env["GIT_TERMINAL_PROMPT"] = "0"
+                env["GIT_CONFIG_COUNT"] = "2"
+                env["GIT_CONFIG_KEY_0"] = "credential.helper"
+                env["GIT_CONFIG_VALUE_0"] = "manager"
+                env["GIT_CONFIG_KEY_1"] = "credential.https://github.com.useHttpPath"
+                env["GIT_CONFIG_VALUE_1"] = "true"
             env["PATH"] = os.pathsep.join(path_parts + [env.get("PATH", "")])
             env["GIT_EXEC_PATH"] = os.path.join(root, "mingw64", "libexec", "git-core")
             return git_exe, env, True
@@ -336,6 +351,7 @@ class SchoolHub:
         self.auto_sync_enabled = bool(self.config.get("auto_sync", False))
         self.auto_start_enabled = bool(self.config.get("auto_start", False))
         self.auto_sync_job = None
+        self.auto_sync_pending_unlock = False
         self.repo_path = "Repository Git temporaneo (eliminato al termine della sync)"
         self._load_active_vault()
 
@@ -484,13 +500,10 @@ class SchoolHub:
                 pass
 
         old_version = int(old.get("version", 0) or 0) if str(old.get("version", "0")).isdigit() else 0
+        # Preserve the repository explicitly saved by the user, including
+        # MeloniMirko/Scuola. DEFAULT_REMOTE is empty, so there is no public
+        # repository that can appear here unless the user configured it.
         remote = scuola.get("remote") or old.get("remote") or DEFAULT_REMOTE
-        # Historical public default must never be reused automatically on another PC.
-        if str(remote).strip().rstrip("/").lower() in {
-            "https://github.com/melonimirko/scuola.git",
-            "https://github.com/melonimirko/scuola",
-        }:
-            remote = ""
         branch = scuola.get("branch") or old.get("branch") or DEFAULT_BRANCH
         github_user = scuola.get("github_user") or old.get("github_user") or ""
         if not github_user:
@@ -1727,6 +1740,14 @@ class SchoolHub:
                     self.root.after(0, lambda text=error_text: messagebox.showerror("Workspace", text, parent=self.root))
             finally:
                 self.workspace_busy = False
+                if (
+                    self.running
+                    and self.auto_sync_enabled
+                    and self.git_enabled
+                    and self.remote
+                    and self.workspace.is_unlocked
+                ):
+                    self.root.after(300, self._auto_sync_after_unlock)
         threading.Thread(target=worker, daemon=True).start()
 
     def workspace_session_lock(self):
@@ -1854,7 +1875,7 @@ class SchoolHub:
         try:
             source, _ = self._get_sync_source(password, temp_root)
             self._assert_remote_private()
-            self.write_log("↔ Scaricamento GitHub privato per risolvere i conflitti...")
+            self.write_log("↔ Scaricamento GitHub per risolvere i conflitti...")
             self._clone_remote(repo)
 
             state = self._load_sync_state()
@@ -2203,10 +2224,26 @@ class SchoolHub:
         self.git_enabled=bool(self.remote)
         self.config.update({"version":7,"remote":self.remote,"branch":self.branch,"github_user":self.github_user,"auto_sync":self.auto_sync_enabled,"auto_start":self.auto_start_enabled,"interval":self.interval,"workspace_path":self.workspace_path,"vault_path":self.vault_path,"sync_state_file":self.sync_state_file})
         save_config(self.config)
-        self.set_windows_startup(self.auto_start_enabled)
+        startup_ok = self.set_windows_startup(self.auto_start_enabled)
+        if self.auto_start_enabled and not startup_ok:
+            self.auto_start_enabled = False
+            self.start_var.set(False)
+            self.config["auto_start"] = False
+            save_config(self.config)
+            messagebox.showerror(
+                "Avvio automatico",
+                "Windows non ha accettato/verificato l'avvio automatico. La spunta è stata disattivata; controlla Attività per il dettaglio.",
+                parent=self.root,
+            )
         self.schedule_auto_sync()
-        self.write_log("✓ Impostazioni salvate.")
-        messagebox.showinfo("SchoolHub","Impostazioni salvate.", parent=self.root)
+        self.write_log("✓ Impostazioni salvate e applicate.")
+        messagebox.showinfo(
+            "SchoolHub",
+            "Impostazioni salvate.\n\n"
+            + ("Avvio Windows: verificato.\n" if self.auto_start_enabled else "Avvio Windows: disattivato.\n")
+            + ("Sync automatica: attiva." if self.auto_sync_enabled else "Sync automatica: disattivata."),
+            parent=self.root,
+        )
         self.navigate("Home")
 
     def clone_repository(self):
@@ -2279,13 +2316,13 @@ class SchoolHub:
             return None
 
     def _assert_remote_private(self):
-        """Fail closed for public repositories; private repos are verified by authenticated Git access."""
+        """Verify the configured GitHub remote is reachable. Public repositories are allowed."""
         # Local bare repositories are used only by the source test-suite. Frozen
         # production builds never accept a local path as a sync remote.
         if not getattr(sys, "frozen", False) and self.remote and os.path.exists(self.remote):
             return
         if not self.remote:
-            raise WorkspaceError("Repository GitHub non configurato. Impostane uno privato nelle Impostazioni.")
+            raise WorkspaceError("Repository GitHub non configurato. Impostalo nelle Impostazioni.")
         parts = self._github_repo_parts()
         if not parts:
             raise WorkspaceError("SchoolHub accetta per la sincronizzazione solo repository GitHub HTTPS.")
@@ -2304,7 +2341,7 @@ class SchoolHub:
             raise
         except urllib.error.HTTPError as exc:
             if exc.code != 404:
-                raise WorkspaceError(f"Impossibile verificare in sicurezza la privacy del repository GitHub (HTTP {exc.code}). Sync bloccata.") from exc
+                raise WorkspaceError(f"Impossibile verificare il repository GitHub (HTTP {exc.code}).") from exc
             # GitHub intentionally returns 404 for private repositories to anonymous API calls.
             os.makedirs(APP_DIR, exist_ok=True)
             code, out, err = self.git(["ls-remote", self._git_remote_for_auth()], cwd=APP_DIR, timeout=60)
@@ -2312,7 +2349,7 @@ class SchoolHub:
                 raise WorkspaceError(err or out or "Repository privato non raggiungibile o accesso GitHub non autorizzato.")
             return
         except Exception as exc:
-            raise WorkspaceError(f"Impossibile verificare la privacy del repository GitHub. Sync bloccata: {exc}") from exc
+            raise WorkspaceError(f"Impossibile verificare il repository GitHub: {exc}") from exc
 
     @staticmethod
     def _hash_tree(root):
@@ -2599,9 +2636,9 @@ class SchoolHub:
             if password is None: return
 
         self.sync_running = True
-        self.open_progress("Sincronizzazione SchoolHub", "Workspace cifrato ↔ repository GitHub privato")
+        self.open_progress("Sincronizzazione SchoolHub", "Workspace cifrato ↔ repository GitHub")
         self.progress_update(2, "Preparazione", "Creazione snapshot sicuro")
-        self.set_status("SINCRONIZZAZIONE...", YELLOW, "Workspace cifrato ↔ GitHub privato")
+        self.set_status("SINCRONIZZAZIONE...", YELLOW, "Workspace cifrato ↔ GitHub")
         threading.Thread(target=self.sync_worker, args=(password,), daemon=True).start()
 
     def sync_worker(self, password=None):
@@ -2614,9 +2651,9 @@ class SchoolHub:
             local_files = self._hash_tree(source)
             state = self._load_sync_state()
 
-            self.progress_update(20, "Sicurezza", "Verifica che il repository non sia pubblico")
+            self.progress_update(20, "Sicurezza", "Verifica repository GitHub")
             self._assert_remote_private()
-            self.write_log("↔ Scaricamento repository GitHub privato in area temporanea...")
+            self.write_log("↔ Scaricamento repository GitHub in area temporanea...")
             self.progress_update(28, "Download GitHub", "Clone shallow del repository")
             self._clone_remote(repo)
             self.progress_update(43, "Confronto", "Analisi differenze locale ↔ GitHub")
@@ -2922,7 +2959,6 @@ class SchoolHub:
     # ========================================================
 
     def schedule_auto_sync(self):
-
         if self.auto_sync_job is not None:
             try:
                 self.root.after_cancel(self.auto_sync_job)
@@ -2930,62 +2966,102 @@ class SchoolHub:
                 pass
             self.auto_sync_job = None
 
-        if self.running and self.auto_sync_enabled:
+        if self.running and self.auto_sync_enabled and self.git_enabled and self.remote:
             self.auto_sync_job = self.root.after(
-                self.interval * 1000,
+                max(30, int(self.interval)) * 1000,
                 self.auto_sync
             )
 
+    def _auto_sync_after_unlock(self):
+        if not self.running:
+            return
+        if not (self.auto_sync_enabled and self.git_enabled and self.remote):
+            return
+        if self.sync_running or self.workspace_busy or not self.workspace.is_unlocked:
+            return
+        self.auto_sync_pending_unlock = False
+        self.write_log("◷ Workspace sbloccato: eseguo la sincronizzazione automatica in attesa.")
+        self.start_sync(manual=False)
+
     def auto_sync(self):
-
         self.auto_sync_job = None
-
         if not self.running:
             return
 
         if self.auto_sync_enabled and self.git_enabled and self.remote:
-            if not self.sync_running:
+            if self.sync_running or self.workspace_busy:
+                self.write_log("◷ Sync automatica rimandata: SchoolHub occupato.")
+            elif not self.workspace.is_unlocked:
+                self.auto_sync_pending_unlock = True
+                self.write_log("◷ Sync automatica in attesa: sblocca il Workspace; partirà subito dopo.")
+            else:
+                self.auto_sync_pending_unlock = False
                 self.write_log("◷ Avvio sincronizzazione automatica.")
                 self.start_sync(manual=False)
-            else:
-                self.write_log("◷ Sync automatica saltata: sincronizzazione già in corso.")
 
         self.schedule_auto_sync()
 
     def set_windows_startup(self, enabled):
+        """Apply and verify HKCU Run startup entry. Return True only when verified."""
         if os.name != "nt":
-            return
+            return not enabled
         try:
             import winreg
-            # Remove the legacy Startup-folder shortcut used by older SchoolHub builds,
-            # otherwise disabling autostart in Settings would not actually disable it.
+
             legacy = os.path.join(
                 os.environ.get("APPDATA", ""),
                 r"Microsoft\Windows\Start Menu\Programs\Startup\SchoolHub.lnk"
             )
             try:
-                if os.path.isfile(legacy): os.unlink(legacy)
+                if os.path.isfile(legacy):
+                    os.unlink(legacy)
             except OSError:
                 pass
 
             key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
             value_name = "SchoolHub"
-            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+            expected = None
+            with winreg.CreateKeyEx(
+                winreg.HKEY_CURRENT_USER,
+                key_path,
+                0,
+                winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE,
+            ) as key:
                 if enabled:
                     if getattr(sys, "frozen", False):
-                        command = f'"{sys.executable}"'
+                        exe = os.path.abspath(sys.executable)
+                        if not os.path.isfile(exe):
+                            raise RuntimeError(f"EXE SchoolHub non trovato: {exe}")
+                        expected = f'"{exe}"'
                     else:
                         python = sys.executable
                         if os.path.basename(python).lower() == "python.exe":
                             pythonw = os.path.join(os.path.dirname(python), "pythonw.exe")
-                            if os.path.exists(pythonw): python = pythonw
-                        command = f'"{python}" "{os.path.abspath(__file__)}"'
-                    winreg.SetValueEx(key, value_name, 0, winreg.REG_SZ, command)
-                else:
-                    try: winreg.DeleteValue(key, value_name)
-                    except FileNotFoundError: pass
-        except Exception as e:
-            self.write_log(f"⚠ Avvio automatico Windows non aggiornato: {e}")
+                            if os.path.exists(pythonw):
+                                python = pythonw
+                        expected = f'"{python}" "{os.path.abspath(__file__)}"'
+                    winreg.SetValueEx(key, value_name, 0, winreg.REG_SZ, expected)
+                    winreg.FlushKey(key)
+                    actual, _ = winreg.QueryValueEx(key, value_name)
+                    if str(actual).strip() != expected:
+                        raise RuntimeError("Windows non ha confermato il comando di avvio automatico.")
+                    self.write_log(f"✓ Avvio automatico Windows verificato: {expected}")
+                    return True
+
+                try:
+                    winreg.DeleteValue(key, value_name)
+                    winreg.FlushKey(key)
+                except FileNotFoundError:
+                    pass
+                try:
+                    winreg.QueryValueEx(key, value_name)
+                    raise RuntimeError("Windows mantiene ancora la voce di avvio automatico.")
+                except FileNotFoundError:
+                    self.write_log("✓ Avvio automatico Windows disattivato e verificato.")
+                    return True
+        except Exception as exc:
+            self.write_log(f"✕ Avvio automatico Windows non applicato: {exc}")
+            return False
 
     def write_log(self, text):
 
@@ -3214,6 +3290,15 @@ def _frozen_self_test(output_path):
             raise RuntimeError(cp.stderr or cp.stdout or "git --version fallito")
         result["checks"]["git"] = cp.stdout.strip()
         result["checks"]["git_bundled"] = bool(bundled)
+        cp_gcm = subprocess.run(
+            [git_exe, "credential-manager", "--version"], cwd=temp_root,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            env=git_env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+        )
+        if cp_gcm.returncode != 0:
+            raise RuntimeError(cp_gcm.stderr or cp_gcm.stdout or "Git Credential Manager non disponibile")
+        result["checks"]["git_credential_manager"] = cp_gcm.stdout.strip() or cp_gcm.stderr.strip() or True
 
         ws = os.path.join(temp_root, "Workspaces", "Scuola")
         vault = os.path.join(temp_root, "Vaults", "Scuola.vault")
