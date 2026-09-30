@@ -243,6 +243,112 @@ jobs:
           & "vendor\git\cmd\git.exe" --version
           if ($LASTEXITCODE -ne 0) { throw "Bundled MinGit failed" }
 
+      - name: Bundle Git Credential Manager
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $headers = @{ "User-Agent" = "SchoolHub-Build/2.4" }
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/git-ecosystem/git-credential-manager/releases/latest" -Headers $headers
+          $asset = $release.assets | Where-Object { $_.name -match '^gcm-win-x64-.*\.zip
+      - name: Run tests
+        shell: pwsh
+        run: |
+          python -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { throw "Tests failed" }
+
+      - name: Build EXE
+        shell: pwsh
+        run: |
+          python -m PyInstaller --clean --noconfirm SchoolHub.spec
+          if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
+          if (!(Test-Path "dist\SchoolHub.exe")) { throw "SchoolHub.exe missing" }
+          $size = (Get-Item "dist\SchoolHub.exe").Length
+          $mb = [math]::Round($size / 1MB, 1)
+          Write-Host "SchoolHub.exe size: $mb MB"
+          if ($size -gt 160MB) { throw "UltraLight size budget exceeded: $mb MB" }
+
+      - name: Self-test EXE
+        shell: pwsh
+        run: |
+          $out = Join-Path $PWD "dist\selftest.json"
+          $p = Start-Process ".\dist\SchoolHub.exe" -ArgumentList @("--self-test", $out) -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "Self-test process failed: $($p.ExitCode)" }
+          $result = Get-Content $out -Raw | ConvertFrom-Json
+          $result | ConvertTo-Json -Depth 8
+          if (-not $result.ok) { throw "Self-test reported failure" }
+          if (-not $result.checks.vault_roundtrip) { throw "Vault failed" }
+          if (-not $result.checks.media_streaming) { throw "Media streaming failed" }
+          if (-not $result.checks.legacy_stream_unlock) { throw "Legacy SHENC1 streaming unlock failed" }
+          if (-not $result.checks.git_bundled) { throw "Bundled Git failed" }
+          if (-not $result.checks.safe_default_remote) { throw "Privacy remote failed" }
+          if ($result.checks.version -ne "2.4.6") { throw "Wrong version" }
+
+      - name: GUI idle smoke test
+        shell: pwsh
+        run: |
+          $p = Start-Process ".\dist\SchoolHub.exe" -PassThru
+          Start-Sleep -Seconds 15
+          $p.Refresh()
+          if ($p.HasExited) { throw "GUI exited at startup: $($p.ExitCode)" }
+
+          $procs = @(Get-Process -Name "SchoolHub" -ErrorAction SilentlyContinue)
+          $mem = ($procs | Measure-Object -Property WorkingSet64 -Sum).Sum
+          $cpu1 = ($procs | Measure-Object -Property CPU -Sum).Sum
+          Start-Sleep -Seconds 5
+          $procs2 = @(Get-Process -Name "SchoolHub" -ErrorAction SilentlyContinue)
+          $cpu2 = ($procs2 | Measure-Object -Property CPU -Sum).Sum
+          $delta = [double]$cpu2 - [double]$cpu1
+          $memMb = [math]::Round(([double]$mem / 1MB), 1)
+          Write-Host "Idle working set: $memMb MB"
+          Write-Host "CPU used over 5s idle window: $([math]::Round($delta, 3)) s"
+
+          if ($mem -gt 200MB) { throw "Idle RAM budget exceeded: $memMb MB" }
+          if ($delta -gt 1.0) { throw "Idle CPU budget exceeded: $delta s over 5s" }
+
+          Get-Process -Name "SchoolHub" -ErrorAction SilentlyContinue | Stop-Process -Force
+
+      - name: Checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash ".\dist\SchoolHub.exe" -Algorithm SHA256).Hash.ToLower()
+          "$hash  SchoolHub.exe" | Set-Content ".\dist\SchoolHub.exe.sha256.txt" -Encoding ASCII
+          Get-Content ".\dist\SchoolHub.exe.sha256.txt"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SchoolHub-Windows-OneFile-v2.4.6-SyncFix
+          path: |
+            dist/SchoolHub.exe
+            dist/SchoolHub.exe.sha256.txt
+            dist/selftest.json
+            schoolhub_splash.png
+          compression-level: 0
+          retention-days: 30
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "schoolhub-v2.4.6"
+          $notes = "SchoolHub 2.4.6 Sync + Autostart Fix: corregge il riavvio dopo aggiornamento dei build PyInstaller one-file, aspettando la chiusura completa della vecchia istanza e avviando la nuova con ambiente PyInstaller pulito. Mantiene Simple Public Sync, Instant Unlock, fix SHENC1 legacy, MinGit e test di integrità."
+          if (gh release view $tag --repo "$env:GITHUB_REPOSITORY" *> $null) {
+            gh release upload $tag ".\dist\SchoolHub.exe#SchoolHub.exe" ".\dist\SchoolHub.exe.sha256.txt#SchoolHub.exe.sha256.txt" --clobber --repo "$env:GITHUB_REPOSITORY"
+            gh release edit $tag --title "SchoolHub 2.4.6 Sync + Autostart Fix" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
+          } else {
+            gh release create $tag ".\dist\SchoolHub.exe#SchoolHub.exe" ".\dist\SchoolHub.exe.sha256.txt#SchoolHub.exe.sha256.txt" --target "$env:GITHUB_SHA" --title "SchoolHub 2.4.6 Sync + Autostart Fix" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
+          }
+ -and $_.name -notmatch 'symbols' } | Select-Object -First 1
+          if (-not $asset) { throw "Git Credential Manager x64 ZIP not found" }
+          Write-Host "Using $($asset.name)"
+          Invoke-WebRequest -Uri $asset.browser_download_url -Headers $headers -OutFile "GCM.zip"
+          New-Item -ItemType Directory -Force "vendor\gcm" | Out-Null
+          Expand-Archive -Path "GCM.zip" -DestinationPath "vendor\gcm" -Force
+          if (-not (Test-Path "vendor\gcm\git-credential-manager.exe")) { throw "GCM executable missing" }
+          & "vendor\gcm\git-credential-manager.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "Bundled GCM failed" }
+
       - name: Run tests
         shell: pwsh
         run: |
