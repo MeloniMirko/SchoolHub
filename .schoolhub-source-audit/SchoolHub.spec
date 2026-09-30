@@ -1,6 +1,7 @@
 hiddenimports = []
 datas = [
     ("vendor/git", "vendor/git"),
+    ("vendor/gcm", "vendor/gcm"),
     ("schoolhub_icon.png", "."),
     ("VERSION.txt", "."),
 ]
