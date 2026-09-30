@@ -2401,34 +2401,33 @@ class SchoolHub:
             pass
         return self.remote
 
-    def _clone_remote(self, destination):
-        os.makedirs(os.path.dirname(destination), exist_ok=True)
-        code, out, err = self.git(
-            ["clone", "--depth", "1", "--no-tags", self._git_remote_for_auth(), destination],
-            cwd=os.path.dirname(destination)
-        )
+    def _clone_remote(self, destination, branch=None):
+        """Create a shallow working copy of exactly one data branch."""
+        branch = branch or self.branch
+        os.makedirs(destination, exist_ok=True)
+        code, out, err = self.git(["init"], cwd=destination)
         if code != 0:
-            raise WorkspaceError(err or out or "Impossibile scaricare il repository GitHub.")
-
-        # Keep credentials separated by GitHub repository path on this Windows user.
+            raise WorkspaceError(err or out or "Impossibile inizializzare il repository temporaneo.")
+        code, out, err = self.git(["remote", "add", "origin", self._git_remote_for_auth()], cwd=destination)
+        if code != 0:
+            raise WorkspaceError(err or out or "Impossibile configurare il repository GitHub.")
         self.git(["config", "credential.useHttpPath", "true"], cwd=destination)
 
-        # Check out the requested branch if it exists remotely. On an empty repo,
-        # point HEAD to the requested unborn branch without requiring a commit.
-        code, _, _ = self.git(["rev-parse", "--verify", f"refs/remotes/origin/{self.branch}"], cwd=destination)
-        if code == 0:
-            code, out, err = self.git(["checkout", "-B", self.branch, f"origin/{self.branch}"], cwd=destination)
+        code, out, err = self.git(["ls-remote", "--heads", "origin", f"refs/heads/{branch}"], cwd=destination, timeout=60)
+        if code != 0:
+            raise WorkspaceError(err or out or "Impossibile leggere i branch GitHub.")
+
+        if out.strip():
+            code, out2, err2 = self.git(["fetch", "--depth", "1", "origin", f"refs/heads/{branch}"], cwd=destination)
             if code != 0:
-                raise WorkspaceError(err or out or f"Impossibile aprire il branch {self.branch}.")
+                raise WorkspaceError(err2 or out2 or f"Impossibile scaricare il branch {branch}.")
+            code, out2, err2 = self.git(["checkout", "-B", branch, "FETCH_HEAD"], cwd=destination)
+            if code != 0:
+                raise WorkspaceError(err2 or out2 or f"Impossibile aprire il branch {branch}.")
         else:
-            code_head, _, _ = self.git(["rev-parse", "--verify", "HEAD"], cwd=destination)
-            if code_head == 0:
-                raise WorkspaceError(
-                    f"Il branch '{self.branch}' non esiste su GitHub. Imposta nelle Impostazioni il branch corretto prima di sincronizzare."
-                )
-            code, out, err = self.git(["symbolic-ref", "HEAD", f"refs/heads/{self.branch}"], cwd=destination)
+            code, out2, err2 = self.git(["symbolic-ref", "HEAD", f"refs/heads/{branch}"], cwd=destination)
             if code != 0:
-                raise WorkspaceError(err or out or f"Impossibile inizializzare il branch {self.branch}.")
+                raise WorkspaceError(err2 or out2 or f"Impossibile inizializzare il branch {branch}.")
 
     def _get_sync_source(self, password, temp_root):
         """Create a stable plaintext snapshot used for the whole sync operation."""
@@ -2511,12 +2510,13 @@ class SchoolHub:
         if actual != expected:
             raise WorkspaceError("Verifica finale fallita: il Vault/Workspace non corrisponde ai file sincronizzati.")
 
-    def _verify_remote_head(self, repo):
-        """After a push, verify that origin/<branch> points to the same commit."""
+    def _verify_remote_head(self, repo, branch=None):
+        """After a push, verify that the requested remote branch matches local HEAD."""
+        branch = branch or self.branch
         code, local_head, _ = self.git(["rev-parse", "HEAD"], cwd=repo)
         if code != 0 or not local_head:
             return  # empty repository: there is no commit to verify
-        code, out, err = self.git(["ls-remote", "origin", f"refs/heads/{self.branch}"], cwd=repo)
+        code, out, err = self.git(["ls-remote", "origin", f"refs/heads/{branch}"], cwd=repo)
         if code != 0:
             raise WorkspaceError(err or "Impossibile verificare il commit pubblicato su GitHub.")
         remote_head = out.split()[0] if out.split() else ""
