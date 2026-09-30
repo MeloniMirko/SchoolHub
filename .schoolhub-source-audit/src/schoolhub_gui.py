@@ -28,9 +28,11 @@ CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 LOG_FILE = os.path.join(APP_DIR, "schoolhub.log")
 SYNC_STATE_FILE = os.path.join(APP_DIR, "sync_state.json")
 
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.4.0"
 RELEASE_API = "https://api.github.com/repos/MeloniMirko/Scuola/releases/latest"
-UPDATE_USER_AGENT = "SchoolHub-Updater/2.2"
+UPDATE_USER_AGENT = "SchoolHub-Updater/2.4"
+UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
+UPDATE_STAMP_FILE = os.path.join(APP_DIR, "last_update_check.txt")
 GIT_TIMEOUT_SECONDS = 180
 
 DEFAULT_REPO = os.path.join(APP_DIR, "TempGit")
@@ -96,10 +98,10 @@ CYAN = "#38bdf8"
 
 def default_config():
     return {
-        "version": 6,
+        "version": 7,
         "interval": DEFAULT_INTERVAL,
         "auto_sync": False,
-        "auto_start": True,
+        "auto_start": False,
         "workspace_path": DEFAULT_WORKSPACE,
         "vault_path": os.path.join(APP_DIR, "Vaults", "Scuola.vault"),
         "remote": DEFAULT_REMOTE,
@@ -297,7 +299,7 @@ class ProgressDialog:
         if self.closed or not self.win.winfo_exists(): return
         sec=int(time.monotonic()-self.started)
         self.elapsed.configure(text=f"{sec//60:02d}:{sec%60:02d}")
-        self.win.after(500,self.tick)
+        self.win.after(1000,self.tick)
 
     def set(self, value, stage=None, detail=None):
         if self.closed or not self.win.winfo_exists(): return
@@ -332,7 +334,7 @@ class SchoolHub:
             self.interval = DEFAULT_INTERVAL
         self.interval = max(30, self.interval)
         self.auto_sync_enabled = bool(self.config.get("auto_sync", False))
-        self.auto_start_enabled = bool(self.config.get("auto_start", True))
+        self.auto_start_enabled = bool(self.config.get("auto_start", False))
         self.auto_sync_job = None
         self.repo_path = "Repository Git temporaneo (eliminato al termine della sync)"
         self._load_active_vault()
@@ -343,6 +345,10 @@ class SchoolHub:
         self.last_conflicts = []
         self.progress_dialog = None
         self.update_check_running = False
+
+        # UltraLight: apply the startup policy immediately so upgrades from
+        # older builds do not keep a stale Windows autorun entry.
+        self.set_windows_startup(self.auto_start_enabled)
 
         # Serve a invalidare callback provenienti da vecchie pagine
         self.page_generation = 0
@@ -363,10 +369,7 @@ class SchoolHub:
 
         self.navigate("Home")
 
-        self.root.after(
-            1000,
-            self.update_clock
-        )
+        self.root.after(60000, self.update_clock)
 
         self.root.after(
             1500,
@@ -499,15 +502,16 @@ class SchoolHub:
         except Exception:
             interval = DEFAULT_INTERVAL
         interval = max(30, min(interval, 86400))
-        migrated_auto_sync = bool(old.get("auto_sync", False)) if old_version >= 5 else False
+        migrated_auto_sync = bool(old.get("auto_sync", False)) if old_version >= 7 else False
+        migrated_auto_start = bool(old.get("auto_start", False)) if old_version >= 7 else False
         if not remote:
             migrated_auto_sync = False
 
         self.config = {
-            "version": 6,
+            "version": 7,
             "interval": interval,
             "auto_sync": migrated_auto_sync,
-            "auto_start": bool(old.get("auto_start", True)),
+            "auto_start": migrated_auto_start,
             "workspace_path": chosen_wp,
             "vault_path": chosen_vp,
             "remote": remote,
@@ -572,6 +576,21 @@ class SchoolHub:
     def check_for_updates(self, silent=False):
         if self.update_check_running or not self.running:
             return
+
+        # UltraLight: silent startup checks may touch the network at most once
+        # per day. Manual checks always bypass this cache.
+        if silent:
+            try:
+                if os.path.isfile(UPDATE_STAMP_FILE):
+                    age = time.time() - os.path.getmtime(UPDATE_STAMP_FILE)
+                    if 0 <= age < UPDATE_CHECK_INTERVAL_SECONDS:
+                        return
+                os.makedirs(APP_DIR, exist_ok=True)
+                with open(UPDATE_STAMP_FILE, "w", encoding="ascii") as fh:
+                    fh.write(str(int(time.time())))
+            except OSError:
+                pass
+
         self.update_check_running = True
         def worker():
             try:
@@ -2129,7 +2148,7 @@ class SchoolHub:
         self.auto_sync_enabled=bool(self.auto_var.get()) and bool(self.remote)
         self.auto_start_enabled=self.start_var.get()
         self.git_enabled=bool(self.remote)
-        self.config.update({"version":6,"remote":self.remote,"branch":self.branch,"github_user":self.github_user,"auto_sync":self.auto_sync_enabled,"auto_start":self.auto_start_enabled,"interval":self.interval,"workspace_path":self.workspace_path,"vault_path":self.vault_path,"sync_state_file":self.sync_state_file})
+        self.config.update({"version":7,"remote":self.remote,"branch":self.branch,"github_user":self.github_user,"auto_sync":self.auto_sync_enabled,"auto_start":self.auto_start_enabled,"interval":self.interval,"workspace_path":self.workspace_path,"vault_path":self.vault_path,"sync_state_file":self.sync_state_file})
         save_config(self.config)
         self.set_windows_startup(self.auto_start_enabled)
         self.schedule_auto_sync()
@@ -2919,7 +2938,7 @@ class SchoolHub:
     def write_log(self, text):
 
         timestamp = datetime.now().strftime(
-            "%d/%m/%Y %H:%M:%S"
+            "%d/%m/%Y   %H:%M"
         )
 
         line = f"[{timestamp}] {text}\n"
@@ -3083,7 +3102,7 @@ class SchoolHub:
 
                 self.time_label.configure(
                     text=datetime.now().strftime(
-                        "%d/%m/%Y   %H:%M:%S"
+                        "%d/%m/%Y   %H:%M"
                     )
                 )
 
@@ -3092,10 +3111,7 @@ class SchoolHub:
 
         if self.running:
 
-            self.root.after(
-                1000,
-                self.update_clock
-            )
+            self.root.after(60000, self.update_clock)
 
     # ========================================================
     # CLOSE
@@ -3189,9 +3205,47 @@ def _frozen_self_test(output_path):
     return 0 if result["ok"] else 2
 
 
+_INSTANCE_LOCK = None
+
+def _acquire_single_instance():
+    """Hold a 1-byte Windows file lock for the lifetime of the process."""
+    global _INSTANCE_LOCK
+    if os.name != "nt":
+        return True
+    fh = None
+    try:
+        import msvcrt
+        os.makedirs(APP_DIR, exist_ok=True)
+        lock_path = os.path.join(APP_DIR, "SchoolHub.instance.lock")
+        fh = open(lock_path, "a+b")
+        fh.seek(0, os.SEEK_END)
+        if fh.tell() == 0:
+            fh.write(b"\0")
+            fh.flush()
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        _INSTANCE_LOCK = fh
+        return True
+    except OSError:
+        try:
+            if fh is not None:
+                fh.close()
+        except Exception:
+            pass
+        return False
+
+
 def main():
     if len(sys.argv) >= 3 and sys.argv[1] == "--self-test":
         raise SystemExit(_frozen_self_test(sys.argv[2]))
+
+    if not _acquire_single_instance():
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(0, "SchoolHub è già aperto.", "SchoolHub", 0x40)
+        except Exception:
+            pass
+        return
 
     root = None
     try:
