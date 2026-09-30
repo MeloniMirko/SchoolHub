@@ -357,27 +357,80 @@ class WorkspaceManager:
 
         aad_base = self.FILE_AAD_PREFIX + str(rel).replace("\\", "/").encode("utf-8")
 
-        # Backward compatibility with all existing SHENC1 Vaults.
+        # Backward compatibility with legacy SHENC1 Vaults.
+        # SHENC1 was originally decrypted with AESGCM.decrypt() in one shot,
+        # which loaded the whole file into RAM and emitted no progress until
+        # completion. Use low-level streaming GCM so multi-GB legacy files stay
+        # memory-bounded and visibly advance the progress bar.
         if magic == self.FILE_MAGIC_V1:
             try:
-                payload = source.read_bytes()
+                total = source.stat().st_size
             except OSError as exc:
                 raise WorkspaceError(f"Impossibile leggere il file cifrato {rel}: {exc}") from exc
-            if len(payload) < len(self.FILE_MAGIC_V1) + self.NONCE_LEN + 16:
+
+            header_len = len(self.FILE_MAGIC_V1) + self.NONCE_LEN
+            cipher_len = total - header_len - 16
+            if cipher_len < 0:
                 raise WorkspaceError(f"File cifrato non valido: {rel}")
-            offset = len(self.FILE_MAGIC_V1)
-            nonce = payload[offset:offset + self.NONCE_LEN]
-            ciphertext = payload[offset + self.NONCE_LEN:]
+
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            tmp = dest.with_name(dest.name + ".tmp-" + secrets.token_hex(8))
             try:
-                plain = _aesgcm()(key).decrypt(nonce, ciphertext, aad_base)
-            except Exception as exc:
-                raise WorkspaceError(f"Impossibile decifrare {rel}: password errata o file danneggiato.") from exc
-            try:
-                self._atomic_write(dest, plain)
-                self._notify_progress(progress, 1.0, "Decifratura", rel)
+                from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+                with source.open("rb") as src:
+                    if src.read(len(self.FILE_MAGIC_V1)) != self.FILE_MAGIC_V1:
+                        raise WorkspaceError(f"Formato file non riconosciuto: {rel}")
+                    nonce = src.read(self.NONCE_LEN)
+                    if len(nonce) != self.NONCE_LEN:
+                        raise WorkspaceError(f"File cifrato troncato: {rel}")
+                    src.seek(total - 16)
+                    tag = src.read(16)
+                    if len(tag) != 16:
+                        raise WorkspaceError(f"File cifrato troncato: {rel}")
+                    src.seek(header_len)
+
+                    decryptor = Cipher(algorithms.AES(key), modes.GCM(nonce, tag)).decryptor()
+                    decryptor.authenticate_additional_data(aad_base)
+
+                    done = 0
+                    remaining = cipher_len
+                    with tmp.open("wb") as out:
+                        while remaining:
+                            chunk = src.read(min(self.STREAM_CHUNK_SIZE, remaining))
+                            if not chunk:
+                                raise WorkspaceError(f"File cifrato troncato: {rel}")
+                            plain = decryptor.update(chunk)
+                            out.write(plain)
+                            done += len(chunk)
+                            remaining -= len(chunk)
+                            self._notify_progress(
+                                progress,
+                                done / max(1, cipher_len),
+                                "Decifratura legacy",
+                                rel,
+                            )
+                        try:
+                            tail = decryptor.finalize()
+                        except Exception as exc:
+                            raise WorkspaceError(
+                                f"Impossibile decifrare {rel}: password errata o file danneggiato."
+                            ) from exc
+                        if tail:
+                            out.write(tail)
+                        out.flush()
+                        os.fsync(out.fileno())
+                os.replace(tmp, dest)
+                self._notify_progress(progress, 1.0, "Decifratura legacy", rel)
                 return
+            except WorkspaceError:
+                raise
             except OSError as exc:
                 raise WorkspaceError(f"Impossibile ripristinare {rel}: {exc}") from exc
+            finally:
+                try:
+                    tmp.unlink()
+                except FileNotFoundError:
+                    pass
 
         if magic != self.FILE_MAGIC:
             raise WorkspaceError(f"Formato file non riconosciuto: {rel}")
@@ -750,21 +803,37 @@ class WorkspaceManager:
 
         try:
             encrypted_items = []
+            total_bytes = 0
             for root, dirs, files in os.walk(self.files_path, followlinks=False):
                 root_path = Path(root)
                 dirs[:] = [d for d in dirs if not (root_path / d).is_symlink()]
                 for name in files:
                     p = root_path / name
                     self._ensure_not_symlink(p)
-                    encrypted_items.append((p, p.relative_to(self.files_path)))
-            total_items = max(1, len(encrypted_items))
-            for item_index, (p, rel) in enumerate(encrypted_items):
+                    try:
+                        size = max(1, p.stat().st_size)
+                    except OSError:
+                        size = 1
+                    encrypted_items.append((p, p.relative_to(self.files_path), size))
+                    total_bytes += size
+
+            total_bytes = max(1, total_bytes)
+            completed_bytes = 0
+            self._notify_progress(progress, 0.005, "Analisi Vault", f"{len(encrypted_items)} file da sbloccare")
+            for p, rel, encrypted_size in encrypted_items:
                 dest = self._safe_plain_destination(rel, temp_plain)
                 dest.parent.mkdir(parents=True, exist_ok=True)
+                base = completed_bytes
                 self._decrypt_file(
                     p, dest, key, rel,
-                    progress=lambda frac, phase, detail, i=item_index: self._notify_progress(progress, 0.94 * ((i + frac) / total_items), phase, detail)
+                    progress=lambda frac, phase, detail, b=base, s=encrypted_size: self._notify_progress(
+                        progress,
+                        0.94 * ((b + (s * float(frac))) / total_bytes),
+                        phase,
+                        detail,
+                    )
                 )
+                completed_bytes += encrypted_size
             self._notify_progress(progress, 0.97, "Verifica", "Controllo integrità Workspace")
 
             if existing_plain:
