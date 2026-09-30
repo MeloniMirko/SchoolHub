@@ -7,12 +7,15 @@ import json
 import sys
 import tempfile
 import hashlib
+import tarfile
+import re
 import shutil
 import time
 import urllib.request
 import urllib.error
 import urllib.parse
 from datetime import datetime
+from pathlib import Path
 
 from workspace import WorkspaceManager, WorkspaceError
 
@@ -28,9 +31,9 @@ CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 LOG_FILE = os.path.join(APP_DIR, "schoolhub.log")
 SYNC_STATE_FILE = os.path.join(APP_DIR, "sync_state.json")
 
-APP_VERSION = "2.4.2"
+APP_VERSION = "2.4.3"
 RELEASE_API = "https://api.github.com/repos/MeloniMirko/Scuola/releases/latest"
-UPDATE_USER_AGENT = "SchoolHub-Updater/2.4.2"
+UPDATE_USER_AGENT = "SchoolHub-Updater/2.4.3"
 UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 UPDATE_STAMP_FILE = os.path.join(APP_DIR, "last_update_check.txt")
 GIT_TIMEOUT_SECONDS = 180
@@ -38,6 +41,9 @@ GIT_TIMEOUT_SECONDS = 180
 DEFAULT_REPO = os.path.join(APP_DIR, "TempGit")
 DEFAULT_REMOTE = ""
 DEFAULT_BRANCH = "master"
+PUBLIC_DATA_BRANCH = "schoolhub-encrypted-data"
+PUBLIC_CONTAINER_DIR = ".schoolhub-public"
+PUBLIC_CHUNK_SIZE = 80 * 1024 * 1024
 DEFAULT_INTERVAL = 300
 
 DEFAULT_WORKSPACE = os.path.join(APP_DIR, "Workspaces", "Scuola")
