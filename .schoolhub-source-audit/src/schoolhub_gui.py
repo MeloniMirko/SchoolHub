@@ -2271,14 +2271,12 @@ class SchoolHub:
         except Exception:
             return None
 
-    def _assert_remote_private(self):
-        """Fail closed for public repositories; private repos are verified by authenticated Git access."""
-        # Local bare repositories are used only by the source test-suite. Frozen
-        # production builds never accept a local path as a sync remote.
+    def _remote_visibility(self):
+        """Return 'public' or 'private' for the configured GitHub repository."""
         if not getattr(sys, "frozen", False) and self.remote and os.path.exists(self.remote):
-            return
+            return "private"
         if not self.remote:
-            raise WorkspaceError("Repository GitHub non configurato. Impostane uno privato nelle Impostazioni.")
+            raise WorkspaceError("Repository GitHub non configurato.")
         parts = self._github_repo_parts()
         if not parts:
             raise WorkspaceError("SchoolHub accetta per la sincronizzazione solo repository GitHub HTTPS.")
@@ -2289,24 +2287,27 @@ class SchoolHub:
             with urllib.request.urlopen(req, timeout=12) as response:
                 data = json.loads(response.read().decode("utf-8"))
             if data.get("private") is False:
-                raise WorkspaceError(
-                    "SYNC BLOCCATA: il repository GitHub configurato è PUBBLICO. Crea/usa un repository privato: SchoolHub non pubblicherà file scolastici o personali su un repository pubblico."
-                )
+                return "public"
             if data.get("private") is True:
-                return
-        except WorkspaceError:
-            raise
+                return "private"
+            raise WorkspaceError("GitHub non ha restituito lo stato privacy del repository.")
         except urllib.error.HTTPError as exc:
             if exc.code != 404:
-                raise WorkspaceError(f"Impossibile verificare in sicurezza la privacy del repository GitHub (HTTP {exc.code}). Sync bloccata.") from exc
-            # GitHub intentionally returns 404 for private repositories to anonymous API calls.
+                raise WorkspaceError(f"Impossibile verificare il repository GitHub (HTTP {exc.code}).") from exc
             os.makedirs(APP_DIR, exist_ok=True)
             code, out, err = self.git(["ls-remote", self._git_remote_for_auth()], cwd=APP_DIR, timeout=60)
             if code != 0:
-                raise WorkspaceError(err or out or "Repository privato non raggiungibile o accesso GitHub non autorizzato.")
-            return
+                raise WorkspaceError(err or out or "Repository GitHub non raggiungibile o accesso non autorizzato.")
+            return "private"
+        except WorkspaceError:
+            raise
         except Exception as exc:
-            raise WorkspaceError(f"Impossibile verificare la privacy del repository GitHub. Sync bloccata: {exc}") from exc
+            raise WorkspaceError(f"Impossibile verificare il repository GitHub: {exc}") from exc
+
+    def _assert_remote_private(self):
+        if self._remote_visibility() != "private":
+            raise WorkspaceError("Questa operazione richiede il percorso privato legacy.")
+        return
 
     @staticmethod
     def _hash_tree(root):
