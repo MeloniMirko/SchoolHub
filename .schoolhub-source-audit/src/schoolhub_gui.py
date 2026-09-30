@@ -3471,7 +3471,7 @@ def _frozen_self_test(output_path):
                 raise RuntimeError("Formato streaming SHENC2 non attivo")
 
         # Legacy SHENC1 regression test: emulate a large old-format file and
-        # verify that 2.4.2 can stream-decrypt it instead of loading it all at once.
+        # verify that legacy unlock can stream-decrypt it instead of loading it all at once.
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         legacy_rel = "legacy-large.bin"
         legacy_plain = (b"LegacySchoolHub" * 600000)  # > 8 MiB
@@ -3505,6 +3505,31 @@ def _frozen_self_test(output_path):
         if not wm.is_unlocked:
             raise RuntimeError("Sblocco rapido non valido")
         result["checks"]["instant_unlock_seconds"] = round(fast_elapsed, 3)
+
+        # Public-repository encrypted transport regression test.
+        # No original filename may appear in the simulated public Git tree.
+        public_repo = os.path.join(temp_root, "public-repo")
+        os.makedirs(os.path.join(public_repo, ".git"), exist_ok=True)
+        app = object.__new__(SchoolHub)
+        app.workspace = wm
+        app._public_remote_pack(ws, public_repo, password, temp_root)
+
+        exposed_names = []
+        for current, dirs, files in os.walk(public_repo):
+            if ".git" in current.split(os.sep):
+                continue
+            for name in files:
+                rel = os.path.relpath(os.path.join(current, name), public_repo).replace("\\", "/")
+                exposed_names.append(rel)
+        for forbidden in ("selftest.txt", "selftest.mp4", legacy_rel):
+            if any(forbidden in path for path in exposed_names):
+                raise RuntimeError("Il trasporto pubblico espone un nome file originale")
+
+        public_plain = app._public_remote_unpack(public_repo, password, temp_root)
+        if SchoolHub._hash_tree(public_plain) != SchoolHub._hash_tree(ws):
+            raise RuntimeError("Round-trip repository pubblico cifrato non valido")
+        result["checks"]["public_encrypted_transport"] = True
+        result["checks"]["public_names_hidden"] = True
 
         wm.lock(password)
         result["checks"]["vault_roundtrip"] = True
