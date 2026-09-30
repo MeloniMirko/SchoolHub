@@ -28,9 +28,9 @@ CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 LOG_FILE = os.path.join(APP_DIR, "schoolhub.log")
 SYNC_STATE_FILE = os.path.join(APP_DIR, "sync_state.json")
 
-APP_VERSION = "2.4.4"
+APP_VERSION = "2.4.5"
 RELEASE_API = "https://api.github.com/repos/MeloniMirko/Scuola/releases/latest"
-UPDATE_USER_AGENT = "SchoolHub-Updater/2.4.4"
+UPDATE_USER_AGENT = "SchoolHub-Updater/2.4.5"
 UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 UPDATE_STAMP_FILE = os.path.join(APP_DIR, "last_update_check.txt")
 GIT_TIMEOUT_SECONDS = 180
@@ -664,11 +664,24 @@ class SchoolHub:
                 batch = os.path.join(tempfile.gettempdir(), f"SchoolHub-update-{os.getpid()}.cmd")
                 script = (
                     "@echo off\r\n"
-                    "setlocal\r\n"
-                    "timeout /t 2 /nobreak >nul\r\n"
-                    f":retry\r\nmove /y \"{new_exe}\" \"{current}\" >nul 2>&1\r\n"
-                    "if errorlevel 1 (timeout /t 1 /nobreak >nul & goto retry)\r\n"
-                    f"start \"\" \"{current}\"\r\n"
+                    "setlocal DisableDelayedExpansion\r\n"
+                    # PyInstaller one-file children inherit internal _PYI_* state.
+                    # A freshly replaced EXE must start as a brand-new application,
+                    # otherwise it can look for python*.dll in the old _MEI folder.
+                    "set PYINSTALLER_RESET_ENVIRONMENT=1\r\n"
+                    f"set \"SCHOOLHUB_OLD_PID={os.getpid()}\"\r\n"
+                    f"set \"SCHOOLHUB_NEW_EXE={new_exe}\"\r\n"
+                    f"set \"SCHOOLHUB_TARGET={current}\"\r\n"
+                    ":wait_old_process\r\n"
+                    "tasklist /FI \"PID eq %SCHOOLHUB_OLD_PID%\" /NH 2>nul | findstr /R /C:\"^[^I].*%SCHOOLHUB_OLD_PID%\" >nul\r\n"
+                    "if not errorlevel 1 (timeout /t 1 /nobreak >nul & goto wait_old_process)\r\n"
+                    ":retry_replace\r\n"
+                    "copy /b /y \"%SCHOOLHUB_NEW_EXE%\" \"%SCHOOLHUB_TARGET%.updating\" >nul 2>&1\r\n"
+                    "if errorlevel 1 (timeout /t 1 /nobreak >nul & goto retry_replace)\r\n"
+                    "move /y \"%SCHOOLHUB_TARGET%.updating\" \"%SCHOOLHUB_TARGET%\" >nul 2>&1\r\n"
+                    "if errorlevel 1 (timeout /t 1 /nobreak >nul & goto retry_replace)\r\n"
+                    "del /q \"%SCHOOLHUB_NEW_EXE%\" >nul 2>&1\r\n"
+                    "start \"\" /D \"%~dp0\" \"%SCHOOLHUB_TARGET%\"\r\n"
                     "del \"%~f0\"\r\n"
                 )
                 with open(batch, "w", encoding="utf-8", newline="") as fh:
