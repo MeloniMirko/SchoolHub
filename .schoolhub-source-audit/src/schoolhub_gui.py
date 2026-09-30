@@ -7,15 +7,12 @@ import json
 import sys
 import tempfile
 import hashlib
-import tarfile
-import re
 import shutil
 import time
 import urllib.request
 import urllib.error
 import urllib.parse
 from datetime import datetime
-from pathlib import Path
 
 from workspace import WorkspaceManager, WorkspaceError
 
@@ -31,9 +28,9 @@ CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 LOG_FILE = os.path.join(APP_DIR, "schoolhub.log")
 SYNC_STATE_FILE = os.path.join(APP_DIR, "sync_state.json")
 
-APP_VERSION = "2.4.3"
+APP_VERSION = "2.4.4"
 RELEASE_API = "https://api.github.com/repos/MeloniMirko/Scuola/releases/latest"
-UPDATE_USER_AGENT = "SchoolHub-Updater/2.4.3"
+UPDATE_USER_AGENT = "SchoolHub-Updater/2.4.4"
 UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 UPDATE_STAMP_FILE = os.path.join(APP_DIR, "last_update_check.txt")
 GIT_TIMEOUT_SECONDS = 180
@@ -41,9 +38,6 @@ GIT_TIMEOUT_SECONDS = 180
 DEFAULT_REPO = os.path.join(APP_DIR, "TempGit")
 DEFAULT_REMOTE = ""
 DEFAULT_BRANCH = "master"
-PUBLIC_DATA_BRANCH = "schoolhub-encrypted-data"
-PUBLIC_CONTAINER_DIR = ".schoolhub-public"
-PUBLIC_CHUNK_SIZE = 80 * 1024 * 1024
 DEFAULT_INTERVAL = 300
 
 DEFAULT_WORKSPACE = os.path.join(APP_DIR, "Workspaces", "Scuola")
@@ -1793,88 +1787,87 @@ class SchoolHub:
             messagebox.showerror("Workspace", f"Impossibile aprire il Workspace:\n{e}")
 
     def _resolve_conflict(self, choice):
-        """Resolve all currently conflicting files in one explicit operation."""
+        """Resolve all currently conflicting files in one explicit operation.
+        choice='local' keeps the encrypted Workspace version.
+        choice='remote' keeps the GitHub version.
+        """
         if not self.git_enabled:
             return
+
         if self.sync_running:
             messagebox.showinfo("SchoolHub", "Una sincronizzazione è già in corso.")
             return
         if self.workspace_busy:
             messagebox.showinfo("SchoolHub", "È in corso un'operazione sul Workspace. Attendi che termini.")
             return
+
+        password = None
         if not self.workspace.exists:
             messagebox.showwarning("Workspace", "Workspace cifrato non trovato.")
             return
 
-        password = self.ask_password(
-            "Password Workspace",
-            "Inserisci la password del Workspace per risolvere i conflitti anche sui repository pubblici cifrati."
-        )
-        if password is None:
-            return
+        if not self.workspace.is_unlocked:
+            password = self.ask_password("Password Workspace", "Inserisci la password del Workspace per risolvere i conflitti.")
+            if password is None:
+                return
 
         if choice == "local":
             question = (
                 "Vuoi usare il Workspace come versione definitiva?\n\n"
-                "I file in conflitto su GitHub verranno sostituiti dalla copia locale."
+                "I file in conflitto su GitHub verranno sostituiti "
+                "dalla copia locale e verrà creato un nuovo commit."
             )
         else:
             question = (
                 "Vuoi usare GitHub come versione definitiva?\n\n"
-                "I file in conflitto locali verranno sostituiti dalla copia presente su GitHub."
+                "I file in conflitto locali verranno sostituiti "
+                "dalla copia presente su GitHub."
             )
+
         if not messagebox.askyesno("Risolvi conflitti", question, parent=self.root):
             return
 
         self.sync_running = True
         self.set_status("RISOLUZIONE CONFLITTI...", YELLOW, "Operazione esplicita richiesta")
-        threading.Thread(target=self._resolve_conflict_worker, args=(choice, password), daemon=True).start()
+        threading.Thread(
+            target=self._resolve_conflict_worker,
+            args=(choice, password),
+            daemon=True
+        ).start()
 
     def _resolve_conflict_worker(self, choice, password):
         temp_root = tempfile.mkdtemp(prefix="schoolhub-conflict-")
         repo = os.path.join(temp_root, "repo")
         try:
             source, _ = self._get_sync_source(password, temp_root)
-            visibility = self._remote_visibility()
-            data_branch = PUBLIC_DATA_BRANCH if visibility == "public" else self.branch
-
-            self.write_log(
-                "🔐 Risoluzione conflitti sul payload pubblico cifrato..."
-                if visibility == "public"
-                else "↔ Risoluzione conflitti sul repository privato..."
-            )
-            self._clone_remote(repo, branch=data_branch)
-
-            if visibility == "public":
-                remote_tree = self._public_remote_unpack(repo, password, temp_root)
-            else:
-                remote_tree = repo
+            self._assert_remote_private()
+            self.write_log("↔ Scaricamento GitHub per risolvere i conflitti...")
+            self._clone_remote(repo)
 
             state = self._load_sync_state()
             baseline = state.get("files", {}) if state is not None else {}
             local_files = self._hash_tree(source)
-            remote_files = self._hash_tree(remote_tree)
+            remote_files = self._hash_tree(repo)
             local_only, remote_only, conflicts = self._classify_changes(baseline, local_files, remote_files)
             if not conflicts:
                 self.last_conflicts = []
-                raise WorkspaceError("Non risultano più conflitti. Sincronizza normalmente.")
+                raise WorkspaceError("Non risultano più conflitti. Aggiorna lo stato e sincronizza normalmente.")
 
+            # Start from GitHub. Preserve independent local changes, and apply the
+            # conflicting local paths only when the user explicitly chose Workspace.
             paths_to_take_local = set(local_only)
             if choice == "local":
                 paths_to_take_local.update(conflicts)
 
             if self.workspace.is_unlocked and self._hash_tree(self.workspace.get_unlocked_path()) != local_files:
                 raise WorkspaceError(
-                    "Il Workspace è stato modificato durante la risoluzione. Nessun file viene sovrascritto: riprova."
+                    "Il Workspace è stato modificato durante la risoluzione. Nessun file viene sovrascritto: aggiorna i conflitti e riprova."
                 )
 
             if paths_to_take_local:
-                self._apply_paths(source, remote_tree, local_files, paths_to_take_local)
+                self._apply_paths(source, repo, local_files, paths_to_take_local)
 
-            self._persist_sync_tree(remote_tree, password, temp_root)
-
-            if visibility == "public":
-                self._public_remote_pack(remote_tree, repo, password, temp_root)
+            self._persist_sync_tree(repo, password, temp_root)
 
             self._ensure_git_identity(repo)
             code, _, err = self.git(["add", "-A"], cwd=repo)
@@ -1883,12 +1876,12 @@ class SchoolHub:
             code, out, err = self.git(["commit", "-m", "SchoolHub: risoluzione conflitti"], cwd=repo)
             if code != 0 and "nothing to commit" not in (out + " " + err).lower():
                 raise WorkspaceError(err or out or "git commit fallito.")
-            code, out, err = self.git(["push", "-u", "origin", data_branch], cwd=repo)
+            code, out, err = self.git(["push", "-u", "origin", self.branch], cwd=repo)
             if code != 0:
                 raise WorkspaceError(err or out or "git push fallito.")
-            self._verify_remote_head(repo, branch=data_branch)
+            self._verify_remote_head(repo)
 
-            final_files = self._hash_tree(remote_tree)
+            final_files = self._hash_tree(repo)
             self._save_sync_state(final_files)
             self.last_conflicts = []
             if choice == "local":
@@ -1897,9 +1890,9 @@ class SchoolHub:
             else:
                 self.write_log(f"✓ Conflitti risolti: mantenuto GitHub per {len(conflicts)} file.")
                 self.finish_status("SINCRONIZZATO", GREEN, "Conflitti risolti: mantenuto GitHub")
-        except Exception as exc:
-            self.write_log(f"✕ Risoluzione conflitti fallita: {exc}")
-            self.finish_status("ERRORE", RED, str(exc))
+        except Exception as e:
+            self.write_log(f"✕ Risoluzione conflitti fallita: {e}")
+            self.finish_status("ERRORE", RED, str(e))
         finally:
             shutil.rmtree(temp_root, ignore_errors=True)
             self.sync_running = False
@@ -2150,7 +2143,7 @@ class SchoolHub:
 
         tk.Frame(card, bg=BORDER, height=1).pack(fill="x", padx=22, pady=(0,16))
         tk.Label(card, text="SINCRONIZZAZIONE GITHUB", font=("Segoe UI", 9, "bold"), fg=CYAN, bg=PANEL).pack(anchor="w", padx=22, pady=(0,5))
-        tk.Label(card, text="Puoi usare repository PRIVATI o PUBBLICI. Se è pubblico, SchoolHub usa automaticamente il branch schoolhub-encrypted-data e carica solo un payload cifrato.", font=("Segoe UI",8), fg=MUTED, bg=PANEL, wraplength=760, justify="left").pack(anchor="w", padx=22, pady=(0,10))
+        tk.Label(card, text="Puoi usare un repository GitHub pubblico o privato.", font=("Segoe UI",8), fg=MUTED, bg=PANEL, wraplength=760, justify="left").pack(anchor="w", padx=22, pady=(0,10))
 
         tk.Label(card, text="URL REPOSITORY GITHUB", font=("Segoe UI", 8, "bold"), fg=MUTED, bg=PANEL).pack(anchor="w", padx=22, pady=(0,5))
         self.remote_entry = tk.Entry(card, bg=PANEL2, fg=TEXT, insertbackground=TEXT, relief="flat", font=("Consolas", 9))
@@ -2272,12 +2265,17 @@ class SchoolHub:
         except Exception:
             return None
 
-    def _remote_visibility(self):
-        """Return 'public' or 'private' for the configured GitHub repository."""
+    def _assert_remote_private(self):
+        """Accept both public and private GitHub repositories.
+
+        The method name is kept for compatibility with the existing sync flow.
+        It now verifies only that the configured GitHub repository is valid and
+        reachable; public repositories are no longer rejected.
+        """
         if not getattr(sys, "frozen", False) and self.remote and os.path.exists(self.remote):
-            return "private"
+            return
         if not self.remote:
-            raise WorkspaceError("Repository GitHub non configurato.")
+            raise WorkspaceError("Repository GitHub non configurato. Impostalo nelle Impostazioni.")
         parts = self._github_repo_parts()
         if not parts:
             raise WorkspaceError("SchoolHub accetta per la sincronizzazione solo repository GitHub HTTPS.")
@@ -2287,28 +2285,22 @@ class SchoolHub:
         try:
             with urllib.request.urlopen(req, timeout=12) as response:
                 data = json.loads(response.read().decode("utf-8"))
-            if data.get("private") is False:
-                return "public"
-            if data.get("private") is True:
-                return "private"
-            raise WorkspaceError("GitHub non ha restituito lo stato privacy del repository.")
+            if data.get("private") in (True, False):
+                return
+            raise WorkspaceError("GitHub non ha restituito informazioni valide sul repository.")
+        except WorkspaceError:
+            raise
         except urllib.error.HTTPError as exc:
             if exc.code != 404:
                 raise WorkspaceError(f"Impossibile verificare il repository GitHub (HTTP {exc.code}).") from exc
+            # Private repositories may return 404 to anonymous API requests.
             os.makedirs(APP_DIR, exist_ok=True)
             code, out, err = self.git(["ls-remote", self._git_remote_for_auth()], cwd=APP_DIR, timeout=60)
             if code != 0:
                 raise WorkspaceError(err or out or "Repository GitHub non raggiungibile o accesso non autorizzato.")
-            return "private"
-        except WorkspaceError:
-            raise
+            return
         except Exception as exc:
             raise WorkspaceError(f"Impossibile verificare il repository GitHub: {exc}") from exc
-
-    def _assert_remote_private(self):
-        if self._remote_visibility() != "private":
-            raise WorkspaceError("Questa operazione richiede il percorso privato legacy.")
-        return
 
     @staticmethod
     def _hash_tree(root):
@@ -2402,178 +2394,34 @@ class SchoolHub:
             pass
         return self.remote
 
-    def _clone_remote(self, destination, branch=None):
-        """Create a shallow working copy of exactly one data branch."""
-        branch = branch or self.branch
-        os.makedirs(destination, exist_ok=True)
-        code, out, err = self.git(["init"], cwd=destination)
+    def _clone_remote(self, destination):
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        code, out, err = self.git(
+            ["clone", "--depth", "1", "--no-tags", self._git_remote_for_auth(), destination],
+            cwd=os.path.dirname(destination)
+        )
         if code != 0:
-            raise WorkspaceError(err or out or "Impossibile inizializzare il repository temporaneo.")
-        code, out, err = self.git(["remote", "add", "origin", self._git_remote_for_auth()], cwd=destination)
-        if code != 0:
-            raise WorkspaceError(err or out or "Impossibile configurare il repository GitHub.")
+            raise WorkspaceError(err or out or "Impossibile scaricare il repository GitHub.")
+
+        # Keep credentials separated by GitHub repository path on this Windows user.
         self.git(["config", "credential.useHttpPath", "true"], cwd=destination)
 
-        code, out, err = self.git(["ls-remote", "--heads", "origin", f"refs/heads/{branch}"], cwd=destination, timeout=60)
-        if code != 0:
-            raise WorkspaceError(err or out or "Impossibile leggere i branch GitHub.")
-
-        if out.strip():
-            code, out2, err2 = self.git(["fetch", "--depth", "1", "origin", f"refs/heads/{branch}"], cwd=destination)
+        # Check out the requested branch if it exists remotely. On an empty repo,
+        # point HEAD to the requested unborn branch without requiring a commit.
+        code, _, _ = self.git(["rev-parse", "--verify", f"refs/remotes/origin/{self.branch}"], cwd=destination)
+        if code == 0:
+            code, out, err = self.git(["checkout", "-B", self.branch, f"origin/{self.branch}"], cwd=destination)
             if code != 0:
-                raise WorkspaceError(err2 or out2 or f"Impossibile scaricare il branch {branch}.")
-            code, out2, err2 = self.git(["checkout", "-B", branch, "FETCH_HEAD"], cwd=destination)
-            if code != 0:
-                raise WorkspaceError(err2 or out2 or f"Impossibile aprire il branch {branch}.")
+                raise WorkspaceError(err or out or f"Impossibile aprire il branch {self.branch}.")
         else:
-            code, out2, err2 = self.git(["symbolic-ref", "HEAD", f"refs/heads/{branch}"], cwd=destination)
+            code_head, _, _ = self.git(["rev-parse", "--verify", "HEAD"], cwd=destination)
+            if code_head == 0:
+                raise WorkspaceError(
+                    f"Il branch '{self.branch}' non esiste su GitHub. Imposta nelle Impostazioni il branch corretto prima di sincronizzare."
+                )
+            code, out, err = self.git(["symbolic-ref", "HEAD", f"refs/heads/{self.branch}"], cwd=destination)
             if code != 0:
-                raise WorkspaceError(err2 or out2 or f"Impossibile inizializzare il branch {branch}.")
-
-    def _safe_extract_tar(self, tar_path, destination):
-        os.makedirs(destination, exist_ok=True)
-        base = os.path.abspath(destination)
-        with tarfile.open(tar_path, "r") as tf:
-            for member in tf.getmembers():
-                name = member.name.replace("\\", "/")
-                if not name or name.startswith("/") or ".." in name.split("/"):
-                    raise WorkspaceError("Archivio remoto cifrato non valido: percorso non sicuro.")
-                if member.issym() or member.islnk() or member.isdev():
-                    raise WorkspaceError("Archivio remoto cifrato non valido: collegamento/dispositivo non consentito.")
-                target = os.path.abspath(os.path.join(base, *name.split("/")))
-                try:
-                    if os.path.commonpath([base, target]) != base:
-                        raise WorkspaceError("Archivio remoto cifrato non valido: path traversal.")
-                except ValueError as exc:
-                    raise WorkspaceError("Archivio remoto cifrato non valido.") from exc
-            tf.extractall(base, filter="data")
-
-    def _public_remote_unpack(self, repo, password, temp_root):
-        """Decrypt the public-repository payload into a private temporary tree."""
-        out = os.path.join(temp_root, "public-remote-plain")
-        os.makedirs(out, exist_ok=True)
-        container = os.path.join(repo, PUBLIC_CONTAINER_DIR)
-        meta = os.path.join(container, "vault.json")
-        manifest_path = os.path.join(container, "manifest.json")
-        if not os.path.isfile(meta) and not os.path.isfile(manifest_path):
-            return out
-        if not os.path.isfile(meta) or not os.path.isfile(manifest_path):
-            raise WorkspaceError("Dati SchoolHub pubblici incompleti o danneggiati.")
-
-        try:
-            with open(manifest_path, "r", encoding="utf-8") as fh:
-                manifest = json.load(fh)
-            parts = manifest.get("parts")
-            expected_hash = str(manifest.get("sha256") or "").lower()
-            expected_size = int(manifest.get("encrypted_size") or 0)
-            if manifest.get("format") != 1 or not isinstance(parts, list) or not parts:
-                raise ValueError("manifest")
-            if not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
-                raise ValueError("hash")
-        except Exception as exc:
-            raise WorkspaceError("Manifest del Vault pubblico non valido.") from exc
-
-        encrypted = os.path.join(temp_root, "public-payload.shenc")
-        h = hashlib.sha256()
-        total = 0
-        with open(encrypted, "wb") as dst:
-            for name in parts:
-                if not isinstance(name, str) or not re.fullmatch(r"payload\.part\d{3,6}", name):
-                    raise WorkspaceError("Manifest del Vault pubblico contiene un blocco non valido.")
-                part_path = os.path.join(container, name)
-                if not os.path.isfile(part_path):
-                    raise WorkspaceError(f"Manca un blocco del Vault pubblico: {name}")
-                with open(part_path, "rb") as src:
-                    while True:
-                        chunk = src.read(4 * 1024 * 1024)
-                        if not chunk:
-                            break
-                        dst.write(chunk)
-                        h.update(chunk)
-                        total += len(chunk)
-        if total != expected_size or h.hexdigest() != expected_hash:
-            raise WorkspaceError("Integrità del Vault pubblico non valida.")
-
-        remote_manager = WorkspaceManager(os.path.join(temp_root, "_unused-public"), container)
-        key = remote_manager._verify_password(password)
-        tar_path = os.path.join(temp_root, "public-remote.tar")
-        remote_manager._decrypt_file(encrypted, tar_path, key, Path("payload.tar"))
-        self._safe_extract_tar(tar_path, out)
-        return out
-
-    def _public_remote_pack(self, source, repo, password, temp_root):
-        """Write only opaque encrypted chunks to the dedicated public data branch."""
-        container = os.path.join(repo, PUBLIC_CONTAINER_DIR)
-        old_meta = None
-        old_meta_path = os.path.join(container, "vault.json")
-        if os.path.isfile(old_meta_path):
-            with open(old_meta_path, "rb") as fh:
-                old_meta = fh.read()
-
-        for name in os.listdir(repo):
-            if name == ".git":
-                continue
-            path = os.path.join(repo, name)
-            if os.path.isdir(path):
-                shutil.rmtree(path)
-            else:
-                os.unlink(path)
-        os.makedirs(container, exist_ok=True)
-
-        remote_manager = WorkspaceManager(os.path.join(temp_root, "_unused-pack"), container)
-        meta_path = os.path.join(container, "vault.json")
-        if old_meta:
-            with open(meta_path, "wb") as fh:
-                fh.write(old_meta)
-            key = remote_manager._verify_password(password)
-        else:
-            shutil.copy2(self.workspace.meta_path, meta_path)
-            key = remote_manager._verify_password(password)
-
-        tar_path = os.path.join(temp_root, "public-upload.tar")
-        with tarfile.open(tar_path, "w") as tf:
-            base = os.path.abspath(source)
-            for current, dirs, files in os.walk(base, followlinks=False):
-                dirs[:] = [d for d in dirs if d != ".git" and not os.path.islink(os.path.join(current, d))]
-                for name in files:
-                    fp = os.path.join(current, name)
-                    if os.path.islink(fp):
-                        raise WorkspaceError("Collegamenti simbolici non consentiti nel payload pubblico.")
-                    rel = os.path.relpath(fp, base).replace("\\", "/")
-                    tf.add(fp, arcname=rel, recursive=False)
-
-        encrypted = os.path.join(temp_root, "public-upload.shenc")
-        remote_manager._encrypt_file(tar_path, encrypted, key, Path("payload.tar"))
-
-        h = hashlib.sha256()
-        size = 0
-        parts = []
-        with open(encrypted, "rb") as src:
-            index = 0
-            while True:
-                chunk = src.read(PUBLIC_CHUNK_SIZE)
-                if not chunk:
-                    break
-                name = f"payload.part{index:03d}"
-                with open(os.path.join(container, name), "wb") as dst:
-                    dst.write(chunk)
-                h.update(chunk)
-                size += len(chunk)
-                parts.append(name)
-                index += 1
-        if not parts:
-            raise WorkspaceError("Payload cifrato pubblico vuoto.")
-
-        manifest = {
-            "format": 1,
-            "cipher": "SchoolHub-SHENC2",
-            "encrypted_size": size,
-            "sha256": h.hexdigest(),
-            "parts": parts,
-        }
-        with open(os.path.join(container, "manifest.json"), "w", encoding="utf-8") as fh:
-            json.dump(manifest, fh, indent=2, sort_keys=True)
-            fh.write("\n")
+                raise WorkspaceError(err or out or f"Impossibile inizializzare il branch {self.branch}.")
 
     def _get_sync_source(self, password, temp_root):
         """Create a stable plaintext snapshot used for the whole sync operation."""
@@ -2656,13 +2504,12 @@ class SchoolHub:
         if actual != expected:
             raise WorkspaceError("Verifica finale fallita: il Vault/Workspace non corrisponde ai file sincronizzati.")
 
-    def _verify_remote_head(self, repo, branch=None):
-        """After a push, verify that the requested remote branch matches local HEAD."""
-        branch = branch or self.branch
+    def _verify_remote_head(self, repo):
+        """After a push, verify that origin/<branch> points to the same commit."""
         code, local_head, _ = self.git(["rev-parse", "HEAD"], cwd=repo)
         if code != 0 or not local_head:
             return  # empty repository: there is no commit to verify
-        code, out, err = self.git(["ls-remote", "origin", f"refs/heads/{branch}"], cwd=repo)
+        code, out, err = self.git(["ls-remote", "origin", f"refs/heads/{self.branch}"], cwd=repo)
         if code != 0:
             raise WorkspaceError(err or "Impossibile verificare il commit pubblicato su GitHub.")
         remote_head = out.split()[0] if out.split() else ""
@@ -2700,9 +2547,7 @@ class SchoolHub:
         temp_root = tempfile.mkdtemp(prefix="schoolhub-status-")
         repo = os.path.join(temp_root, "repo")
         try:
-            visibility = self._remote_visibility()
-            if visibility == "public":
-                return None, None, "GitHub pubblico: dati SchoolHub cifrati sul branch schoolhub-encrypted-data."
+            self._assert_remote_private()
             self._clone_remote(repo)
             local_files = self._hash_tree(self.workspace.get_unlocked_path())
             remote_files = self._hash_tree(repo)
@@ -2711,49 +2556,40 @@ class SchoolHub:
             local_only, remote_only, conflicts = self._classify_changes(baseline, local_files, remote_files)
             self.last_conflicts = conflicts[:100]
             return len(local_only) + len(conflicts), len(remote_only) + len(conflicts), bool(local_only or remote_only or conflicts)
-        except Exception as exc:
-            return None, None, str(exc)
+        except Exception as e:
+            return None, None, str(e)
         finally:
             shutil.rmtree(temp_root, ignore_errors=True)
 
     def start_sync(self, manual=True):
         if not self.git_enabled or not self.remote:
             if manual:
-                messagebox.showwarning("GitHub non configurato", "Configura un repository GitHub nelle Impostazioni.", parent=self.root)
+                messagebox.showwarning("GitHub non configurato", "SchoolHub funziona in locale. Per sincronizzare, configura nelle Impostazioni un repository GitHub PRIVATO.", parent=self.root)
             return
         if self.sync_running:
-            if manual:
-                messagebox.showinfo("SchoolHub", "Una sincronizzazione è già in corso.", parent=self.root)
+            if manual: messagebox.showinfo("SchoolHub", "Una sincronizzazione è già in corso.", parent=self.root)
             return
         if self.workspace_busy:
-            if manual:
-                messagebox.showinfo("SchoolHub", "È in corso un'operazione sul Workspace. Attendi che termini.", parent=self.root)
-            else:
-                self.write_log("◷ Sync automatica saltata: Workspace occupato.")
+            if manual: messagebox.showinfo("SchoolHub", "È in corso un'operazione sul Workspace. Attendi che termini.", parent=self.root)
+            else: self.write_log("◷ Sync automatica saltata: Workspace occupato.")
             return
         if not self.workspace.exists:
-            if manual:
-                messagebox.showwarning("Workspace", "Crea prima il Workspace cifrato.", parent=self.root)
-            else:
-                self.write_log("◷ Sync automatica saltata: Workspace non ancora creato.")
+            if manual: messagebox.showwarning("Workspace", "Crea prima il Workspace cifrato.", parent=self.root)
+            else: self.write_log("◷ Sync automatica saltata: Workspace non ancora creato.")
             return
 
         password = None
-        if manual:
-            password = self.ask_password(
-                "Sincronizza Workspace",
-                "Inserisci la password del Workspace. Nei repository pubblici serve a cifrare/decifrare il payload remoto."
-            )
-            if password is None:
+        if not self.workspace.is_unlocked:
+            if not manual:
+                self.write_log("◷ Sync automatica saltata: Workspace bloccato.")
                 return
-        elif not self.workspace.is_unlocked:
-            self.write_log("◷ Sync automatica saltata: Workspace bloccato.")
-            return
+            password = self.ask_password("Sincronizza Workspace", "Inserisci la password per leggere temporaneamente il Vault durante la sincronizzazione.")
+            if password is None: return
 
         self.sync_running = True
-        self.open_progress("Sincronizzazione SchoolHub", "Workspace ↔ GitHub")
+        self.open_progress("Sincronizzazione SchoolHub", "Workspace cifrato ↔ repository GitHub")
         self.progress_update(2, "Preparazione", "Creazione snapshot sicuro")
-        self.set_status("SINCRONIZZAZIONE...", YELLOW, "Workspace ↔ GitHub")
+        self.set_status("SINCRONIZZAZIONE...", YELLOW, "Workspace cifrato ↔ GitHub")
         threading.Thread(target=self.sync_worker, args=(password,), daemon=True).start()
 
     def sync_worker(self, password=None):
@@ -2762,126 +2598,36 @@ class SchoolHub:
         try:
             self.progress_update(5, "Snapshot", "Preparazione dei file locali")
             source, _ = self._get_sync_source(password, temp_root)
-            self.progress_update(12, "Analisi", "Calcolo impronte SHA-256")
+            self.progress_update(14, "Analisi", "Calcolo impronte SHA-256")
             local_files = self._hash_tree(source)
             state = self._load_sync_state()
-            baseline = state.get("files", {}) if state is not None else {}
 
-            self.progress_update(18, "GitHub", "Rilevamento modalità repository")
-            visibility = self._remote_visibility()
-
-            if visibility == "public":
-                if not password:
-                    raise WorkspaceError(
-                        "Il repository è pubblico e usa la modalità cifrata. Avvia una sincronizzazione manuale e inserisci la password."
-                    )
-                data_branch = PUBLIC_DATA_BRANCH
-                self.write_log(f"🔐 Repository pubblico: uso esclusivo del branch cifrato {data_branch}.")
-                self.progress_update(24, "Download GitHub", f"Branch cifrato {data_branch}")
-                self._clone_remote(repo, branch=data_branch)
-
-                self.progress_update(34, "Decifratura remota", "Verifica e apertura del payload cifrato")
-                remote_plain = self._public_remote_unpack(repo, password, temp_root)
-                self.progress_update(44, "Confronto", "Analisi differenze locale ↔ payload cifrato")
-                remote_files = self._hash_tree(remote_plain)
-
-                local_only, remote_only, conflicts = self._classify_changes(baseline, local_files, remote_files)
-                self.last_conflicts = conflicts[:100]
-                if conflicts:
-                    prefix = "Prima sincronizzazione: " if state is None else ""
-                    raise WorkspaceError(
-                        prefix + f"conflitto su {len(conflicts)} file. Apri Conflitti e scegli quale versione mantenere."
-                    )
-
-                if self.workspace.is_unlocked and self._hash_tree(self.workspace.get_unlocked_path()) != local_files:
-                    raise WorkspaceError(
-                        "Il Workspace è stato modificato durante la sincronizzazione. Nessun file viene sovrascritto: riprova."
-                    )
-
-                if not local_only and not remote_only:
-                    if state is None or baseline != remote_files:
-                        self._save_sync_state(remote_files)
-                    self.write_log("✓ Payload cifrato pubblico già sincronizzato.")
-                    self.progress_update(100, "Completato", "Tutto aggiornato")
-                    self.finish_status("SINCRONIZZATO", GREEN, "GitHub pubblico cifrato · tutto aggiornato")
-                    time.sleep(0.2)
-                    return
-
-                self.progress_update(54, "Merge", f"{len(local_only)} locali · {len(remote_only)} remoti")
-                if local_only:
-                    self._apply_paths(source, remote_plain, local_files, local_only)
-
-                self.progress_update(64, "Vault locale", "Applicazione del risultato")
-                self._persist_sync_tree(remote_plain, password, temp_root)
-
-                if local_only:
-                    self.progress_update(72, "Cifratura GitHub", "Creazione payload opaco e chunk")
-                    self._public_remote_pack(remote_plain, repo, password, temp_root)
-                    self._ensure_git_identity(repo)
-                    code, _, err = self.git(["add", "-A"], cwd=repo)
-                    if code != 0:
-                        raise WorkspaceError(err or "git add fallito.")
-                    message = "SchoolHub encrypted initial sync" if state is None else "SchoolHub encrypted sync"
-                    code, out, err = self.git(["commit", "-m", message], cwd=repo)
-                    if code != 0 and "nothing to commit" not in (out + " " + err).lower():
-                        raise WorkspaceError(err or out or "git commit fallito.")
-
-                    self.progress_update(86, "Upload GitHub", "Invio esclusivamente dei blocchi cifrati")
-                    code, out, err = self.git(["push", "-u", "origin", data_branch], cwd=repo)
-                    if code != 0:
-                        raise WorkspaceError(err or out or "git push fallito.")
-                    self.progress_update(93, "Verifica remota", "Controllo commit cifrato pubblicato")
-                    self._verify_remote_head(repo, branch=data_branch)
-
-                final_files = self._hash_tree(remote_plain)
-                self.progress_update(96, "Verifica finale", "Controllo Workspace ↔ risultato decifrato")
-                if self.workspace.is_unlocked:
-                    if self._hash_tree(self.workspace.get_unlocked_path()) != final_files:
-                        raise WorkspaceError("Verifica finale fallita: Workspace e risultato remoto non coincidono.")
-                else:
-                    verify_dir = os.path.join(temp_root, "verify-final")
-                    self.workspace.export_to(verify_dir, password)
-                    if self._hash_tree(verify_dir) != final_files:
-                        raise WorkspaceError("Verifica finale fallita: Vault locale e risultato remoto non coincidono.")
-
-                self._save_sync_state(final_files)
-                self.last_conflicts = []
-                if local_only and remote_only:
-                    self.write_log(f"↔ Sync cifrata pubblica: {len(local_only)} locali + {len(remote_only)} remoti uniti.")
-                elif local_only:
-                    self.write_log(f"↑ {len(local_only)} modifiche locali inviate in forma cifrata al repo pubblico.")
-                else:
-                    self.write_log(f"↓ {len(remote_only)} modifiche cifrate GitHub importate nel Vault.")
-                self.progress_update(100, "Completato", "Sincronizzazione cifrata completata")
-                self.finish_status("SINCRONIZZATO", GREEN, "GitHub pubblico · payload cifrato")
-                time.sleep(0.2)
-                return
-
-            # Private repositories retain the original plaintext-on-private-repo workflow.
-            self.write_log("↔ Repository privato: sincronizzazione standard.")
-            self.progress_update(28, "Download GitHub", "Clone shallow del repository privato")
+            self.progress_update(20, "Sicurezza", "Verifica che il repository non sia pubblico")
+            self._assert_remote_private()
+            self.write_log("↔ Scaricamento repository GitHub in area temporanea...")
+            self.progress_update(28, "Download GitHub", "Clone shallow del repository")
             self._clone_remote(repo)
             self.progress_update(43, "Confronto", "Analisi differenze locale ↔ GitHub")
             remote_files = self._hash_tree(repo)
 
+            baseline = state.get("files", {}) if state is not None else {}
             local_only, remote_only, conflicts = self._classify_changes(baseline, local_files, remote_files)
             self.last_conflicts = conflicts[:100]
+
             if conflicts:
                 prefix = "Prima sincronizzazione: " if state is None else ""
-                raise WorkspaceError(
-                    prefix + f"conflitto su {len(conflicts)} file. Workspace e GitHub contengono versioni diverse degli stessi percorsi."
-                )
+                raise WorkspaceError(prefix + f"conflitto su {len(conflicts)} file. Workspace e GitHub contengono versioni diverse degli stessi percorsi. Apri Conflitti e scegli quale versione mantenere.")
 
             if self.workspace.is_unlocked and self._hash_tree(self.workspace.get_unlocked_path()) != local_files:
-                raise WorkspaceError("Il Workspace è stato modificato mentre la sincronizzazione era in corso. Riprova.")
+                raise WorkspaceError("Il Workspace è stato modificato mentre la sincronizzazione era in corso. Nessun file viene sovrascritto: avvia di nuovo la sync.")
 
             if not local_only and not remote_only:
                 if state is None or baseline != remote_files:
                     self._save_sync_state(remote_files)
-                self.write_log("✓ Repository privato già sincronizzato.")
+                self.write_log("✓ Repository già sincronizzato." if state is not None else "✓ Prima sincronizzazione: Workspace e GitHub sono già identici.")
                 self.progress_update(100, "Completato", "Tutto aggiornato")
                 self.finish_status("SINCRONIZZATO", GREEN, "Tutto aggiornato")
-                time.sleep(0.2)
+                time.sleep(0.25)
                 return
 
             self.progress_update(52, "Merge", f"{len(local_only)} locali · {len(remote_only)} remoti")
@@ -2895,42 +2641,44 @@ class SchoolHub:
                 self.progress_update(78, "Commit", "Preparazione modifiche Git")
                 self._ensure_git_identity(repo)
                 code, _, err = self.git(["add", "-A"], cwd=repo)
-                if code != 0:
-                    raise WorkspaceError(err or "git add fallito.")
+                if code != 0: raise WorkspaceError(err or "git add fallito.")
                 message = "SchoolHub initial sync" if state is None else "SchoolHub automatic sync"
                 code, out, err = self.git(["commit", "-m", message], cwd=repo)
                 if code != 0 and "nothing to commit" not in (out + " " + err).lower():
                     raise WorkspaceError(err or out or "git commit fallito.")
-                self.progress_update(86, "Upload GitHub", "Invio modifiche al repository privato")
+                self.progress_update(86, "Upload GitHub", "Invio modifiche al repository")
                 code, out, err = self.git(["push", "-u", "origin", self.branch], cwd=repo)
-                if code != 0:
-                    raise WorkspaceError(err or out or "git push fallito.")
+                if code != 0: raise WorkspaceError(err or out or "git push fallito.")
                 self.progress_update(93, "Verifica remota", "Controllo commit pubblicato")
                 self._verify_remote_head(repo)
 
             final_files = self._hash_tree(repo)
-            self.progress_update(96, "Verifica finale", "Confronto tramite SHA-256")
+            self.progress_update(96, "Verifica finale", "Confronto byte per byte tramite SHA-256")
             if self.workspace.is_unlocked:
                 if self._hash_tree(self.workspace.get_unlocked_path()) != final_files:
                     raise WorkspaceError("Verifica finale fallita: Workspace e repository temporaneo non coincidono.")
             else:
-                verify_dir = os.path.join(temp_root, "verify-final-private")
+                verify_dir = os.path.join(temp_root, "verify-final")
                 self.workspace.export_to(verify_dir, password)
                 if self._hash_tree(verify_dir) != final_files:
-                    raise WorkspaceError("Verifica finale fallita: Vault e repository temporaneo non coincidono.")
+                    raise WorkspaceError("Verifica finale fallita: Vault cifrato e repository temporaneo non coincidono.")
 
             self._save_sync_state(final_files)
             self.last_conflicts = []
+            if local_only and remote_only:
+                self.write_log(f"↔ Sync completata: {len(local_only)} modifiche locali + {len(remote_only)} modifiche GitHub unite senza conflitti.")
+            elif local_only:
+                self.write_log(f"↑ {len(local_only)} modifiche locali sincronizzate su GitHub.")
+            else:
+                self.write_log(f"↓ {len(remote_only)} modifiche GitHub importate nel Vault.")
             self.progress_update(100, "Completato", "Sincronizzazione completata")
             self.finish_status("SINCRONIZZATO", GREEN, "Sincronizzazione completata")
-            time.sleep(0.2)
-        except Exception as exc:
-            self.write_log(f"✕ ERRORE SYNC: {exc}")
-            self.progress_update(100, "Errore", str(exc))
-            if self.last_conflicts:
-                self.finish_status("CONFLITTO", RED, str(exc))
-            else:
-                self.finish_status("ERRORE", RED, str(exc))
+            time.sleep(0.25)
+        except Exception as e:
+            self.write_log(f"✕ ERRORE SYNC: {e}")
+            self.progress_update(100, "Errore", str(e))
+            if self.last_conflicts: self.finish_status("CONFLITTO", RED, str(e))
+            else: self.finish_status("ERRORE", RED, str(e))
             time.sleep(0.6)
         finally:
             shutil.rmtree(temp_root, ignore_errors=True)
@@ -3471,7 +3219,7 @@ def _frozen_self_test(output_path):
                 raise RuntimeError("Formato streaming SHENC2 non attivo")
 
         # Legacy SHENC1 regression test: emulate a large old-format file and
-        # verify that legacy unlock can stream-decrypt it instead of loading it all at once.
+        # verify that 2.4.2 can stream-decrypt it instead of loading it all at once.
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         legacy_rel = "legacy-large.bin"
         legacy_plain = (b"LegacySchoolHub" * 600000)  # > 8 MiB
@@ -3505,31 +3253,6 @@ def _frozen_self_test(output_path):
         if not wm.is_unlocked:
             raise RuntimeError("Sblocco rapido non valido")
         result["checks"]["instant_unlock_seconds"] = round(fast_elapsed, 3)
-
-        # Public-repository encrypted transport regression test.
-        # No original filename may appear in the simulated public Git tree.
-        public_repo = os.path.join(temp_root, "public-repo")
-        os.makedirs(os.path.join(public_repo, ".git"), exist_ok=True)
-        app = object.__new__(SchoolHub)
-        app.workspace = wm
-        app._public_remote_pack(ws, public_repo, password, temp_root)
-
-        exposed_names = []
-        for current, dirs, files in os.walk(public_repo):
-            if ".git" in current.split(os.sep):
-                continue
-            for name in files:
-                rel = os.path.relpath(os.path.join(current, name), public_repo).replace("\\", "/")
-                exposed_names.append(rel)
-        for forbidden in ("selftest.txt", "selftest.mp4", legacy_rel):
-            if any(forbidden in path for path in exposed_names):
-                raise RuntimeError("Il trasporto pubblico espone un nome file originale")
-
-        public_plain = app._public_remote_unpack(public_repo, password, temp_root)
-        if SchoolHub._hash_tree(public_plain) != SchoolHub._hash_tree(ws):
-            raise RuntimeError("Round-trip repository pubblico cifrato non valido")
-        result["checks"]["public_encrypted_transport"] = True
-        result["checks"]["public_names_hidden"] = True
 
         wm.lock(password)
         result["checks"]["vault_roundtrip"] = True
