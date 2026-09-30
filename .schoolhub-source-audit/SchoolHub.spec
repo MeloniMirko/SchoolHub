@@ -1,6 +1,4 @@
-from PyInstaller.utils.hooks import collect_submodules
-
-hiddenimports = collect_submodules("cryptography")
+hiddenimports = []
 datas = [
     ("vendor/git", "vendor/git"),
     ("schoolhub_icon.png", "."),
