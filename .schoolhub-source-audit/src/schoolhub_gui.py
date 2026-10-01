@@ -28,9 +28,9 @@ CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 LOG_FILE = os.path.join(APP_DIR, "schoolhub.log")
 SYNC_STATE_FILE = os.path.join(APP_DIR, "sync_state.json")
 
-APP_VERSION = "2.4.7"
+APP_VERSION = "2.4.8"
 RELEASE_API = "https://api.github.com/repos/MeloniMirko/Scuola/releases/latest"
-UPDATE_USER_AGENT = "SchoolHub-Updater/2.4.7"
+UPDATE_USER_AGENT = "SchoolHub-Updater/2.4.8"
 UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 UPDATE_STAMP_FILE = os.path.join(APP_DIR, "last_update_check.txt")
 GIT_TIMEOUT_SECONDS = 180
@@ -2176,7 +2176,36 @@ class SchoolHub:
         tk.Label(card, text="Vault: " + self.vault_path, font=("Consolas", 8), fg=MUTED, bg=PANEL).pack(anchor="w", padx=22, pady=(0, 18))
 
         tk.Frame(card, bg=BORDER, height=1).pack(fill="x", padx=22, pady=(0,16))
-        tk.Label(card, text="SINCRONIZZAZIONE GITHUB", font=("Segoe UI", 9, "bold"), fg=CYAN, bg=PANEL).pack(anchor="w", padx=22, pady=(0,5))
+
+        github_head = tk.Frame(card, bg=PANEL)
+        github_head.pack(fill="x", padx=22, pady=(0,8))
+        github_head_left = tk.Frame(github_head, bg=PANEL)
+        github_head_left.pack(side="left", fill="x", expand=True)
+        tk.Label(github_head_left, text="SINCRONIZZAZIONE GITHUB", font=("Segoe UI", 9, "bold"), fg=CYAN, bg=PANEL).pack(anchor="w")
+        self.settings_dirty_label = tk.Label(
+            github_head_left,
+            text="Tutto salvato",
+            font=("Segoe UI", 8, "bold"),
+            fg=GREEN,
+            bg=PANEL,
+        )
+        self.settings_dirty_label.pack(anchor="w", pady=(3,0))
+        tk.Button(
+            github_head,
+            text="✓  SALVA",
+            command=self.save_settings,
+            bg=GREEN,
+            fg="#06120b",
+            activebackground=GREEN,
+            activeforeground="#06120b",
+            relief="flat",
+            bd=0,
+            font=("Segoe UI", 10, "bold"),
+            cursor="hand2",
+            padx=26,
+            pady=10,
+        ).pack(side="right", padx=(16,0))
+
         tk.Label(card, text="Repository GitHub pubblico o privato: SchoolHub sincronizza usando la modalità standard configurata.", font=("Segoe UI",8), fg=MUTED, bg=PANEL, wraplength=760, justify="left").pack(anchor="w", padx=22, pady=(0,10))
 
         tk.Label(card, text="URL REPOSITORY GITHUB", font=("Segoe UI", 8, "bold"), fg=MUTED, bg=PANEL).pack(anchor="w", padx=22, pady=(0,5))
@@ -2197,30 +2226,29 @@ class SchoolHub:
         self.start_var = tk.BooleanVar(value=self.auto_start_enabled)
         tk.Checkbutton(card, text="Avvia SchoolHub automaticamente con Windows", variable=self.start_var, bg=PANEL, fg=TEXT, selectcolor=PANEL2, activebackground=PANEL, activeforeground=TEXT, font=("Segoe UI", 9)).pack(anchor="w", padx=22, pady=(0, 14))
 
-        save_row = tk.Frame(card, bg=PANEL)
-        save_row.pack(fill="x", padx=22, pady=(2, 22))
         tk.Label(
-            save_row,
-            text="Le modifiche diventano attive solo dopo SALVA.",
+            card,
+            text="Premi SALVA in alto (oppure Ctrl+S) per rendere permanenti URL, branch, intervallo e spunte.",
             font=("Segoe UI", 8),
             fg=MUTED,
             bg=PANEL,
-        ).pack(side="left")
-        tk.Button(
-            save_row,
-            text="✓  SALVA",
-            command=self.save_settings,
-            bg=GREEN,
-            fg="#06120b",
-            activebackground=GREEN,
-            activeforeground="#06120b",
-            relief="flat",
-            bd=0,
-            font=("Segoe UI", 10, "bold"),
-            cursor="hand2",
-            padx=28,
-            pady=12,
-        ).pack(side="right")
+            wraplength=760,
+            justify="left",
+        ).pack(anchor="w", padx=22, pady=(2, 18))
+
+        def mark_settings_dirty(*_):
+            try:
+                self.settings_dirty_label.configure(text="MODIFICHE NON SALVATE", fg=YELLOW)
+            except Exception:
+                pass
+
+        self.remote_entry.bind("<KeyRelease>", mark_settings_dirty)
+        self.branch_entry.bind("<KeyRelease>", mark_settings_dirty)
+        self.interval_entry.bind("<KeyRelease>", mark_settings_dirty)
+        self.auto_var.trace_add("write", mark_settings_dirty)
+        self.start_var.trace_add("write", mark_settings_dirty)
+        self.root.bind("<Control-s>", lambda _event: self.save_settings())
+        self.root.bind("<Control-S>", lambda _event: self.save_settings())
 
     def _show_settings_saved_popup(self, verified):
         """Show an unmistakable modal confirmation after disk read-back succeeds."""
@@ -2416,6 +2444,10 @@ class SchoolHub:
             f"auto_sync={self.auto_sync_enabled} auto_start={self.auto_start_enabled} "
             f"interval={self.interval}s"
         )
+        try:
+            self.settings_dirty_label.configure(text="TUTTO SALVATO", fg=GREEN)
+        except Exception:
+            pass
         self._show_settings_saved_popup(verified)
 
     def clone_repository(self):
