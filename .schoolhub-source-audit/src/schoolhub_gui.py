@@ -28,9 +28,9 @@ CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 LOG_FILE = os.path.join(APP_DIR, "schoolhub.log")
 SYNC_STATE_FILE = os.path.join(APP_DIR, "sync_state.json")
 
-APP_VERSION = "2.4.6"
+APP_VERSION = "2.4.7"
 RELEASE_API = "https://api.github.com/repos/MeloniMirko/Scuola/releases/latest"
-UPDATE_USER_AGENT = "SchoolHub-Updater/2.4.6"
+UPDATE_USER_AGENT = "SchoolHub-Updater/2.4.7"
 UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 UPDATE_STAMP_FILE = os.path.join(APP_DIR, "last_update_check.txt")
 GIT_TIMEOUT_SECONDS = 180
@@ -2195,56 +2195,228 @@ class SchoolHub:
         self.auto_var = tk.BooleanVar(value=self.auto_sync_enabled)
         tk.Checkbutton(card, text="Sincronizzazione automatica", variable=self.auto_var, bg=PANEL, fg=TEXT, selectcolor=PANEL2, activebackground=PANEL, activeforeground=TEXT, font=("Segoe UI", 9)).pack(anchor="w", padx=22, pady=(0, 8))
         self.start_var = tk.BooleanVar(value=self.auto_start_enabled)
-        tk.Checkbutton(card, text="Avvia SchoolHub automaticamente con Windows", variable=self.start_var, bg=PANEL, fg=TEXT, selectcolor=PANEL2, activebackground=PANEL, activeforeground=TEXT, font=("Segoe UI", 9)).pack(anchor="w", padx=22, pady=(0, 18))
+        tk.Checkbutton(card, text="Avvia SchoolHub automaticamente con Windows", variable=self.start_var, bg=PANEL, fg=TEXT, selectcolor=PANEL2, activebackground=PANEL, activeforeground=TEXT, font=("Segoe UI", 9)).pack(anchor="w", padx=22, pady=(0, 14))
 
-        buttons=tk.Frame(self.content,bg=BG); buttons.pack(anchor="w",pady=10)
-        tk.Button(buttons,text="SALVA IMPOSTAZIONI",command=self.save_settings,bg=BLUE,fg="white",activebackground=BLUE,activeforeground="white",relief="flat",bd=0,font=("Segoe UI",10,"bold"),cursor="hand2",padx=22,pady=12).pack(side="left")
+        save_row = tk.Frame(card, bg=PANEL)
+        save_row.pack(fill="x", padx=22, pady=(2, 22))
+        tk.Label(
+            save_row,
+            text="Le modifiche diventano attive solo dopo SALVA.",
+            font=("Segoe UI", 8),
+            fg=MUTED,
+            bg=PANEL,
+        ).pack(side="left")
+        tk.Button(
+            save_row,
+            text="✓  SALVA",
+            command=self.save_settings,
+            bg=GREEN,
+            fg="#06120b",
+            activebackground=GREEN,
+            activeforeground="#06120b",
+            relief="flat",
+            bd=0,
+            font=("Segoe UI", 10, "bold"),
+            cursor="hand2",
+            padx=28,
+            pady=12,
+        ).pack(side="right")
+
+    def _show_settings_saved_popup(self, verified):
+        """Show an unmistakable modal confirmation after disk read-back succeeds."""
+        win = tk.Toplevel(self.root)
+        win.title("SchoolHub")
+        win.configure(bg=BG)
+        win.resizable(False, False)
+        win.transient(self.root)
+        try:
+            win.attributes("-topmost", True)
+        except Exception:
+            pass
+        win.grab_set()
+
+        width, height = 500, 300
+        self.root.update_idletasks()
+        x = self.root.winfo_rootx() + max(20, (self.root.winfo_width() - width) // 2)
+        y = self.root.winfo_rooty() + max(20, (self.root.winfo_height() - height) // 2)
+        win.geometry(f"{width}x{height}+{x}+{y}")
+
+        shell = tk.Frame(win, bg=BG)
+        shell.pack(fill="both", expand=True, padx=28, pady=26)
+        tk.Label(shell, text="✓", font=("Segoe UI Symbol", 38, "bold"), fg=GREEN, bg=BG).pack()
+        tk.Label(
+            shell,
+            text="SALVATO CORRETTAMENTE",
+            font=("Segoe UI", 17, "bold"),
+            fg=TEXT,
+            bg=BG,
+        ).pack(pady=(7, 6))
+        tk.Label(
+            shell,
+            text=(
+                "Le impostazioni sono state scritte su disco e rilette con successo.\n\n"
+                f"Repository: {verified.get('remote') or 'nessuno'}\n"
+                f"Branch: {verified.get('branch') or DEFAULT_BRANCH}\n"
+                f"Sync automatica: {'ATTIVA' if verified.get('auto_sync') else 'DISATTIVA'}\n"
+                f"Avvio Windows: {'ATTIVO' if verified.get('auto_start') else 'DISATTIVO'}"
+            ),
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg=BG,
+            justify="center",
+        ).pack(pady=(0, 18))
+        tk.Button(
+            shell,
+            text="OK",
+            command=win.destroy,
+            bg=BLUE,
+            fg="white",
+            activebackground=BLUE,
+            activeforeground="white",
+            relief="flat",
+            bd=0,
+            font=("Segoe UI", 10, "bold"),
+            cursor="hand2",
+            padx=32,
+            pady=10,
+        ).pack()
+        win.protocol("WM_DELETE_WINDOW", win.destroy)
+        win.focus_force()
 
     def save_settings(self):
         if self.sync_running or self.workspace_busy:
-            messagebox.showinfo("SchoolHub", "Attendi il termine dell'operazione in corso prima di cambiare le impostazioni.", parent=self.root)
-            return
-        new_remote = self.remote_entry.get().strip()
-        new_branch = self.branch_entry.get().strip() or DEFAULT_BRANCH
-        if new_remote and not (new_remote.startswith("https://github.com/") or new_remote.startswith("http://github.com/")):
-            messagebox.showerror("Repository non valido", "Inserisci un URL GitHub HTTPS, oppure lascia il campo vuoto per usare SchoolHub solo in locale.", parent=self.root)
-            return
-        self.remote, self.branch = new_remote, new_branch
-        import re
-        m = re.match(r"https?://github\.com/([^/]+)/", self.remote)
-        self.github_user = m.group(1) if m else ""
-        try:
-            interval_minutes=int(self.interval_entry.get().strip())
-            if interval_minutes<1 or interval_minutes>1440: raise ValueError
-        except Exception:
-            messagebox.showerror("Intervallo non valido","L'intervallo deve essere un numero tra 1 e 1440 minuti.", parent=self.root); return
-        self.interval=interval_minutes*60
-        self.auto_sync_enabled=bool(self.auto_var.get()) and bool(self.remote)
-        self.auto_start_enabled=self.start_var.get()
-        self.git_enabled=bool(self.remote)
-        self.config.update({"version":7,"remote":self.remote,"branch":self.branch,"github_user":self.github_user,"auto_sync":self.auto_sync_enabled,"auto_start":self.auto_start_enabled,"interval":self.interval,"workspace_path":self.workspace_path,"vault_path":self.vault_path,"sync_state_file":self.sync_state_file})
-        save_config(self.config)
-        startup_ok = self.set_windows_startup(self.auto_start_enabled)
-        if self.auto_start_enabled and not startup_ok:
-            self.auto_start_enabled = False
-            self.start_var.set(False)
-            self.config["auto_start"] = False
-            save_config(self.config)
-            messagebox.showerror(
-                "Avvio automatico",
-                "Windows non ha accettato/verificato l'avvio automatico. La spunta è stata disattivata; controlla Attività per il dettaglio.",
+            messagebox.showinfo(
+                "SchoolHub",
+                "Attendi il termine dell'operazione in corso prima di cambiare le impostazioni.",
                 parent=self.root,
             )
+            return
+
+        new_remote = self.remote_entry.get().strip()
+        new_branch = self.branch_entry.get().strip() or DEFAULT_BRANCH
+        if new_remote and not (
+            new_remote.startswith("https://github.com/")
+            or new_remote.startswith("http://github.com/")
+        ):
+            messagebox.showerror(
+                "Repository non valido",
+                "Inserisci un URL GitHub HTTPS, oppure lascia il campo vuoto per usare SchoolHub solo in locale.",
+                parent=self.root,
+            )
+            return
+
+        try:
+            interval_minutes = int(self.interval_entry.get().strip())
+            if interval_minutes < 1 or interval_minutes > 1440:
+                raise ValueError
+        except Exception:
+            messagebox.showerror(
+                "Intervallo non valido",
+                "L'intervallo deve essere un numero tra 1 e 1440 minuti.",
+                parent=self.root,
+            )
+            return
+
+        import re
+        m = re.match(r"https?://github\.com/([^/]+)/", new_remote)
+        new_github_user = m.group(1) if m else ""
+        requested_auto_sync = bool(self.auto_var.get()) and bool(new_remote)
+        requested_auto_start = bool(self.start_var.get())
+        new_interval = interval_minutes * 60
+
+        # First persist the exact UI state.
+        candidate = dict(self.config)
+        candidate.update({
+            "version": 7,
+            "remote": new_remote,
+            "branch": new_branch,
+            "github_user": new_github_user,
+            "auto_sync": requested_auto_sync,
+            "auto_start": requested_auto_start,
+            "interval": new_interval,
+            "workspace_path": self.workspace_path,
+            "vault_path": self.vault_path,
+            "sync_state_file": self.sync_state_file,
+        })
+        try:
+            save_config(candidate)
+        except Exception as exc:
+            self.write_log(f"✕ Salvataggio impostazioni fallito: {exc}")
+            messagebox.showerror(
+                "Salvataggio fallito",
+                f"Non riesco a scrivere config.json.\n\n{exc}",
+                parent=self.root,
+            )
+            return
+
+        # Apply Windows startup, then persist the actual verified state.
+        startup_ok = self.set_windows_startup(requested_auto_start)
+        actual_auto_start = requested_auto_start and startup_ok
+        if requested_auto_start and not startup_ok:
+            self.start_var.set(False)
+            candidate["auto_start"] = False
+            try:
+                save_config(candidate)
+            except Exception as exc:
+                messagebox.showerror(
+                    "Salvataggio fallito",
+                    f"Impossibile salvare lo stato finale dell'avvio Windows.\n\n{exc}",
+                    parent=self.root,
+                )
+                return
+
+        # Read the file back and require exact persistence before claiming success.
+        try:
+            verified = load_config()
+        except Exception as exc:
+            messagebox.showerror(
+                "Verifica salvataggio fallita",
+                f"Le impostazioni sono state scritte ma non possono essere rilette.\n\n{exc}",
+                parent=self.root,
+            )
+            return
+
+        expected = {
+            "remote": new_remote,
+            "branch": new_branch,
+            "github_user": new_github_user,
+            "auto_sync": requested_auto_sync,
+            "auto_start": actual_auto_start,
+            "interval": new_interval,
+        }
+        mismatches = {
+            key: (expected[key], verified.get(key))
+            for key in expected
+            if verified.get(key) != expected[key]
+        }
+        if mismatches:
+            self.write_log(f"✕ Verifica impostazioni fallita: {mismatches}")
+            messagebox.showerror(
+                "Verifica salvataggio fallita",
+                "SchoolHub ha rilevato che alcuni valori non sono rimasti salvati su disco.\n"
+                "Nessun messaggio di successo è stato mostrato. Controlla Attività.",
+                parent=self.root,
+            )
+            return
+
+        # Only now update the live runtime state.
+        self.config = verified
+        self.remote = verified["remote"]
+        self.branch = verified["branch"]
+        self.github_user = verified.get("github_user", "")
+        self.interval = int(verified["interval"])
+        self.auto_sync_enabled = bool(verified["auto_sync"])
+        self.auto_start_enabled = bool(verified["auto_start"])
+        self.git_enabled = bool(self.remote)
         self.schedule_auto_sync()
-        self.write_log("✓ Impostazioni salvate e applicate.")
-        messagebox.showinfo(
-            "SchoolHub",
-            "Impostazioni salvate.\n\n"
-            + ("Avvio Windows: verificato.\n" if self.auto_start_enabled else "Avvio Windows: disattivato.\n")
-            + ("Sync automatica: attiva." if self.auto_sync_enabled else "Sync automatica: disattivata."),
-            parent=self.root,
+
+        self.write_log(
+            "✓ Impostazioni GitHub salvate, rilette e verificate su disco: "
+            f"remote={self.remote or '-'} branch={self.branch} "
+            f"auto_sync={self.auto_sync_enabled} auto_start={self.auto_start_enabled} "
+            f"interval={self.interval}s"
         )
-        self.navigate("Home")
+        self._show_settings_saved_popup(verified)
 
     def clone_repository(self):
         messagebox.showinfo("SchoolHub", "SchoolHub non mantiene repository Git locali permanenti. Usa Git solo nel Vault Git configurato e in una cartella temporanea durante la sincronizzazione.")
