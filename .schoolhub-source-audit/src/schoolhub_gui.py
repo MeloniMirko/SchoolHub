@@ -627,12 +627,34 @@ class SchoolHub:
         req = urllib.request.Request(url, headers={"User-Agent": UPDATE_USER_AGENT, "Accept": "application/vnd.github+json"})
         return urllib.request.urlopen(req, timeout=20)
 
+    def _select_update_release(self):
+        """Return the newest release allowed by the selected update channel."""
+        channel = self.update_channel
+        if channel == "stable":
+            with self._release_request(RELEASE_API) as response:
+                release = json.loads(response.read().decode("utf-8"))
+            return release
+
+        with self._release_request(RELEASES_API) as response:
+            releases = json.loads(response.read().decode("utf-8"))
+        if not isinstance(releases, list):
+            raise RuntimeError("Elenco release GitHub non valido.")
+        candidates = [r for r in releases if not r.get("draft")]
+        if not candidates:
+            raise RuntimeError("Nessuna release disponibile.")
+        candidates.sort(
+            key=lambda r: (
+                version_tuple(r.get("tag_name") or r.get("name") or ""),
+                str(r.get("published_at") or ""),
+            ),
+            reverse=True,
+        )
+        return candidates[0]
+
     def check_for_updates(self, silent=False):
         if self.update_check_running or not self.running:
             return
 
-        # UltraLight: silent startup checks may touch the network at most once
-        # per day. Manual checks always bypass this cache.
         if silent:
             try:
                 if os.path.isfile(UPDATE_STAMP_FILE):
@@ -648,113 +670,239 @@ class SchoolHub:
         self.update_check_running = True
         def worker():
             try:
-                with self._release_request(RELEASE_API) as response:
-                    release = json.loads(response.read().decode("utf-8"))
+                release = self._select_update_release()
                 latest = release.get("tag_name") or release.get("name") or ""
                 if version_tuple(latest) <= version_tuple(APP_VERSION):
                     if not silent and self.running:
-                        self.root.after(0, lambda: messagebox.showinfo("Aggiornamenti", f"SchoolHub {APP_VERSION} è già aggiornato.", parent=self.root))
+                        self.root.after(
+                            0,
+                            lambda: messagebox.showinfo(
+                                "Aggiornamenti",
+                                f"SchoolHub {APP_VERSION} è già aggiornato.\nCanale: {self.update_channel.upper()}",
+                                parent=self.root,
+                            ),
+                        )
                     return
                 if self.running:
                     self.root.after(0, lambda r=release: self._offer_update(r))
             except Exception as exc:
-                self.write_log(f"⚠ Controllo aggiornamenti non riuscito: {exc}")
+                code = self._error_code("update", exc)
+                self.write_log(f"✕ [{code}] Controllo aggiornamenti non riuscito: {exc}")
                 if not silent and self.running:
-                    self.root.after(0, lambda text=str(exc): messagebox.showwarning("Aggiornamenti", f"Impossibile controllare gli aggiornamenti.\n\n{text}", parent=self.root))
+                    self.root.after(
+                        0,
+                        lambda text=str(exc), c=code: messagebox.showwarning(
+                            "Aggiornamenti",
+                            f"[{c}] Impossibile controllare gli aggiornamenti.\n\n{text}",
+                            parent=self.root,
+                        ),
+                    )
             finally:
                 self.update_check_running = False
         threading.Thread(target=worker, daemon=True).start()
 
     def _offer_update(self, release):
         latest = release.get("tag_name") or release.get("name") or "nuova versione"
+        kind = "BETA / PRE-RELEASE" if release.get("prerelease") else "STABLE"
         if messagebox.askyesno(
             "Aggiornamento SchoolHub",
-            f"È disponibile {latest}.\n\nVersione installata: {APP_VERSION}\n\nScaricare e installare adesso?\nSchoolHub si riavvierà automaticamente.",
+            f"È disponibile {latest} ({kind}).\n\n"
+            f"Versione installata: {APP_VERSION}\n"
+            f"Canale: {self.update_channel.upper()}\n\n"
+            "Scaricare e installare tramite SchoolHub Setup?\n"
+            "Prima dell'aggiornamento verrà creato un backup tecnico automatico.",
             parent=self.root,
         ):
             self._download_update(release)
 
+    def _create_preupdate_backup(self, target_version):
+        """Back up configuration/state/metadata before installer-based upgrades."""
+        backups = os.path.join(APP_DIR, "Backups", "PreUpdate")
+        os.makedirs(backups, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        safe_version = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(target_version or "unknown"))
+        path = os.path.join(backups, f"SchoolHub-{APP_VERSION}-to-{safe_version}-{stamp}.zip")
+        manifest = {
+            "created_local": datetime.now().isoformat(timespec="seconds"),
+            "from_version": APP_VERSION,
+            "to_version": str(target_version or ""),
+            "files": [],
+        }
+        candidates = [
+            ("config.json", CONFIG_FILE),
+            ("sync-state.json", self.sync_state_file),
+            ("vault.json", os.path.join(self.vault_path, "vault.json")),
+        ]
+        with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for arcname, source in candidates:
+                if source and os.path.isfile(source):
+                    zf.write(source, arcname)
+                    manifest["files"].append(arcname)
+            zf.writestr("backup-manifest.json", json.dumps(manifest, indent=2, ensure_ascii=False))
+        try:
+            backups_list = sorted(
+                [
+                    os.path.join(backups, name)
+                    for name in os.listdir(backups)
+                    if name.lower().endswith(".zip")
+                ],
+                key=os.path.getmtime,
+                reverse=True,
+            )
+            for old in backups_list[5:]:
+                try:
+                    os.unlink(old)
+                except OSError:
+                    pass
+        except OSError:
+            pass
+        self.write_log(f"✓ Backup pre-aggiornamento creato: {path}")
+        return path
+
+    def _registered_install_dir(self):
+        if os.name != "nt":
+            return ""
+        try:
+            import winreg
+            app_id = "{D4537BD6-45BC-4D88-8A0E-3AF19B8E4B4F}_is1"
+            roots = [
+                (winreg.HKEY_CURRENT_USER, rf"Software\Microsoft\Windows\CurrentVersion\Uninstall\{app_id}"),
+                (winreg.HKEY_LOCAL_MACHINE, rf"Software\Microsoft\Windows\CurrentVersion\Uninstall\{app_id}"),
+            ]
+            for root, key_path in roots:
+                try:
+                    with winreg.OpenKey(root, key_path) as key:
+                        value, _ = winreg.QueryValueEx(key, "InstallLocation")
+                        if value:
+                            return os.path.normpath(value)
+                except OSError:
+                    continue
+        except Exception:
+            pass
+        return ""
+
     def _download_update(self, release):
         if not getattr(sys, "frozen", False):
-            messagebox.showinfo("Aggiornamenti", "L'aggiornamento automatico è disponibile nella versione EXE di SchoolHub.", parent=self.root)
+            messagebox.showinfo(
+                "Aggiornamenti",
+                "L'aggiornamento automatico è disponibile nella versione installata/EXE di SchoolHub.",
+                parent=self.root,
+            )
             return
-        assets = {a.get("name"): a.get("browser_download_url") for a in release.get("assets", []) if a.get("name")}
-        exe_url = assets.get("SchoolHub.exe")
-        sha_url = assets.get("SchoolHub.exe.sha256.txt")
-        if not exe_url or not sha_url:
-            messagebox.showerror("Aggiornamenti", "La release non contiene SchoolHub.exe e il checksum richiesto.", parent=self.root)
+
+        assets = {
+            a.get("name"): a.get("browser_download_url")
+            for a in release.get("assets", [])
+            if a.get("name")
+        }
+        setup_url = assets.get("SchoolHub-Setup.exe")
+        sha_url = assets.get("SchoolHub-Setup.exe.sha256.txt")
+        if not setup_url or not sha_url:
+            messagebox.showerror(
+                "Aggiornamenti",
+                "La release non contiene SchoolHub-Setup.exe e il relativo checksum.",
+                parent=self.root,
+            )
             return
-        self.open_progress("Aggiornamento SchoolHub", "Download e verifica della nuova versione")
-        self.progress_update(5, "Connessione", "Controllo della release GitHub")
+
+        target_version = release.get("tag_name") or release.get("name") or "nuova-versione"
+        self.open_progress("Aggiornamento SchoolHub", "Backup, download e installazione tramite Setup")
+        self.progress_update(4, "Backup", "Salvataggio configurazione e metadata")
+
         def worker():
             try:
+                self._create_preupdate_backup(target_version)
                 update_dir = os.path.join(APP_DIR, "Updates")
                 os.makedirs(update_dir, exist_ok=True)
-                new_exe = os.path.join(update_dir, "SchoolHub.new.exe")
-                self.progress_update(12, "Download", "Scaricamento SchoolHub.exe")
-                req = urllib.request.Request(exe_url, headers={"User-Agent": UPDATE_USER_AGENT})
-                with urllib.request.urlopen(req, timeout=60) as src, open(new_exe, "wb") as dst:
+                new_setup = os.path.join(update_dir, "SchoolHub-Setup.new.exe")
+
+                self.progress_update(10, "Download", "Scaricamento SchoolHub-Setup.exe")
+                req = urllib.request.Request(setup_url, headers={"User-Agent": UPDATE_USER_AGENT})
+                with urllib.request.urlopen(req, timeout=90) as src, open(new_setup, "wb") as dst:
                     total = int(src.headers.get("Content-Length") or 0)
                     done = 0
                     while True:
                         chunk = src.read(1024 * 1024)
-                        if not chunk: break
-                        dst.write(chunk); done += len(chunk)
+                        if not chunk:
+                            break
+                        dst.write(chunk)
+                        done += len(chunk)
                         if total:
-                            self.progress_update(12 + 68 * (done / total), "Download", f"{done/1024/1024:.0f} / {total/1024/1024:.0f} MB")
-                self.progress_update(82, "Verifica", "Controllo SHA-256")
+                            self.progress_update(
+                                10 + 70 * (done / total),
+                                "Download",
+                                f"{done/1024/1024:.0f} / {total/1024/1024:.0f} MB",
+                            )
+
+                self.progress_update(82, "Verifica", "Controllo SHA-256 installer")
                 with self._release_request(sha_url) as response:
                     sha_text = response.read().decode("utf-8", errors="replace").strip()
                 expected = sha_text.split()[0].lower()
                 h = hashlib.sha256()
-                with open(new_exe, "rb") as fh:
+                with open(new_setup, "rb") as fh:
                     for chunk in iter(lambda: fh.read(1024 * 1024), b""):
                         h.update(chunk)
                 actual = h.hexdigest().lower()
                 if len(expected) != 64 or actual != expected:
-                    raise RuntimeError("Checksum SHA-256 della nuova versione non valido.")
-                self.progress_update(95, "Installazione", "Preparazione del riavvio")
-                current = os.path.abspath(sys.executable)
-                batch = os.path.join(tempfile.gettempdir(), f"SchoolHub-update-{os.getpid()}.cmd")
+                    raise RuntimeError("Checksum SHA-256 dell'installer non valido.")
+
+                self.progress_update(94, "Installazione", "Preparazione aggiornamento Windows")
+                current_exe = os.path.abspath(sys.executable)
+                install_dir = self._registered_install_dir()
+                launch_target = (
+                    os.path.join(install_dir, "SchoolHub.exe")
+                    if install_dir
+                    else os.path.join(LOCAL_APPDATA, "Programs", "SchoolHub", "SchoolHub.exe")
+                )
+                batch = os.path.join(tempfile.gettempdir(), f"SchoolHub-setup-update-{os.getpid()}.cmd")
                 script = (
                     "@echo off\r\n"
                     "setlocal DisableDelayedExpansion\r\n"
-                    # PyInstaller one-file children inherit internal _PYI_* state.
-                    # A freshly replaced EXE must start as a brand-new application,
-                    # otherwise it can look for python*.dll in the old _MEI folder.
-                    "set PYINSTALLER_RESET_ENVIRONMENT=1\r\n"
                     f"set \"SCHOOLHUB_OLD_PID={os.getpid()}\"\r\n"
-                    f"set \"SCHOOLHUB_NEW_EXE={new_exe}\"\r\n"
-                    f"set \"SCHOOLHUB_TARGET={current}\"\r\n"
+                    f"set \"SCHOOLHUB_SETUP={new_setup}\"\r\n"
+                    f"set \"SCHOOLHUB_LAUNCH={launch_target}\"\r\n"
+                    f"set \"SCHOOLHUB_FALLBACK={current_exe}\"\r\n"
                     ":wait_old_process\r\n"
                     "tasklist /FI \"PID eq %SCHOOLHUB_OLD_PID%\" /NH 2>nul | findstr /R /C:\"^[^I].*%SCHOOLHUB_OLD_PID%\" >nul\r\n"
                     "if not errorlevel 1 (timeout /t 1 /nobreak >nul & goto wait_old_process)\r\n"
-                    ":retry_replace\r\n"
-                    "copy /b /y \"%SCHOOLHUB_NEW_EXE%\" \"%SCHOOLHUB_TARGET%.updating\" >nul 2>&1\r\n"
-                    "if errorlevel 1 (timeout /t 1 /nobreak >nul & goto retry_replace)\r\n"
-                    "move /y \"%SCHOOLHUB_TARGET%.updating\" \"%SCHOOLHUB_TARGET%\" >nul 2>&1\r\n"
-                    "if errorlevel 1 (timeout /t 1 /nobreak >nul & goto retry_replace)\r\n"
-                    "del /q \"%SCHOOLHUB_NEW_EXE%\" >nul 2>&1\r\n"
-                    "start \"\" /D \"%~dp0\" \"%SCHOOLHUB_TARGET%\"\r\n"
+                    "\"%SCHOOLHUB_SETUP%\" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS\r\n"
+                    "if errorlevel 1 exit /b %errorlevel%\r\n"
+                    "if exist \"%SCHOOLHUB_LAUNCH%\" (start \"\" \"%SCHOOLHUB_LAUNCH%\") else (start \"\" \"%SCHOOLHUB_FALLBACK%\")\r\n"
+                    "del /q \"%SCHOOLHUB_SETUP%\" >nul 2>&1\r\n"
                     "del \"%~f0\"\r\n"
                 )
                 with open(batch, "w", encoding="utf-8", newline="") as fh:
                     fh.write(script)
-                self.progress_update(100, "Pronto", "SchoolHub verrà riavviato")
+
+                self.progress_update(100, "Pronto", "Setup verificato; SchoolHub verrà aggiornato e riavviato")
                 time.sleep(0.4)
-                subprocess.Popen(["cmd.exe", "/c", batch], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                subprocess.Popen(
+                    ["cmd.exe", "/c", batch],
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
                 self.root.after(0, self._close_for_update)
             except Exception as exc:
-                self.write_log(f"✕ Aggiornamento fallito: {exc}")
+                code = self._error_code("update", exc)
+                self.write_log(f"✕ [{code}] Aggiornamento fallito: {exc}")
                 self.close_progress()
                 if self.running:
-                    self.root.after(0, lambda text=str(exc): messagebox.showerror("Aggiornamento", text, parent=self.root))
+                    self.root.after(
+                        0,
+                        lambda text=str(exc), c=code: messagebox.showerror(
+                            "Aggiornamento",
+                            f"[{c}] {text}",
+                            parent=self.root,
+                        ),
+                    )
+
         threading.Thread(target=worker, daemon=True).start()
 
     def _close_for_update(self):
         self.running = False
-        try: self.root.destroy()
-        except Exception: pass
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
 
     # ========================================================
     # UI
