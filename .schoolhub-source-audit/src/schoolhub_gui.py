@@ -3677,9 +3677,12 @@ def _frozen_self_test(output_path):
         shutil.copytree(ws, source_tree)
         with open(os.path.join(source_tree, "editor-open-marker.txt"), "w", encoding="utf-8") as fh:
             fh.write("new")
-        workspace_identity = os.path.abspath(ws)
+        workspace_before = wm.get_unlocked_path()
+        stat_before = os.stat(workspace_before)
         wm.apply_plaintext_paths_from_tree(source_tree, ["editor-open-marker.txt"])
-        if os.path.abspath(wm.get_unlocked_path()) != workspace_identity:
+        workspace_after = wm.get_unlocked_path()
+        stat_after = os.stat(workspace_after)
+        if (stat_before.st_dev, stat_before.st_ino) != (stat_after.st_dev, stat_after.st_ino):
             raise RuntimeError("La sync incrementale ha sostituito la cartella Workspace")
         with open(marker_file, "r", encoding="utf-8") as fh:
             if fh.read() != "new":
