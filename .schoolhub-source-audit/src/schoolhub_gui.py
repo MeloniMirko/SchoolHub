@@ -12,7 +12,8 @@ import time
 import urllib.request
 import urllib.error
 import urllib.parse
-from datetime import datetime
+import uuid
+from datetime import datetime, timezone
 
 from workspace import WorkspaceManager, WorkspaceError
 
@@ -28,13 +29,14 @@ CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 LOG_FILE = os.path.join(APP_DIR, "schoolhub.log")
 SYNC_STATE_FILE = os.path.join(APP_DIR, "sync_state.json")
 
-APP_VERSION = "2.4.11"
+APP_VERSION = "2.5.0"
 RELEASE_API = "https://api.github.com/repos/MeloniMirko/SchoolHub/releases/latest"
-UPDATE_USER_AGENT = "SchoolHub-Updater/2.4.11"
+UPDATE_USER_AGENT = "SchoolHub-Updater/2.5.0"
 UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 UPDATE_STAMP_FILE = os.path.join(APP_DIR, "last_update_check.txt")
 GIT_TIMEOUT_SECONDS = 180
 LFS_MEDIA_PATTERNS = ("*.mp3", "*.mp4", "*.m4a", "*.wav", "*.flac", "*.aac", "*.ogg", "*.mov", "*.mkv", "*.avi", "*.webm")
+DEVICE_STATUS_BRANCH = "schoolhub-status"
 
 DEFAULT_REPO = os.path.join(APP_DIR, "TempGit")
 DEFAULT_REMOTE = ""
@@ -140,7 +142,10 @@ def default_config():
         "remote": DEFAULT_REMOTE,
         "branch": DEFAULT_BRANCH,
         "github_user": "",
-        "sync_state_file": os.path.join(APP_DIR, "SyncState", "Scuola.json")
+        "sync_state_file": os.path.join(APP_DIR, "SyncState", "Scuola.json"),
+        "onboarding_complete": False,
+        "device_id": "",
+        "device_name": "",
     }
 
 def load_config():
@@ -403,6 +408,9 @@ class SchoolHub:
 
         self.navigate("Home")
 
+        if not self.onboarding_complete and not self.remote:
+            self.root.after(500, lambda: self.show_github_setup(first_run=True))
+
         self.root.after(60000, self.update_clock)
 
         self.root.after(
@@ -549,7 +557,12 @@ class SchoolHub:
             "branch": branch,
             "github_user": github_user,
             "sync_state_file": canonical_state,
+            "onboarding_complete": bool(old.get("onboarding_complete", bool(remote))),
+            "device_id": str(old.get("device_id") or uuid.uuid4().hex),
+            "device_name": str(old.get("device_name") or ""),
         }
+        if not self.config["device_name"]:
+            self.config["device_name"] = "Dispositivo " + self.config["device_id"][:6].upper()
         save_config(self.config)
 
     def _load_active_vault(self):
@@ -560,6 +573,9 @@ class SchoolHub:
         self.branch = self.config.get("branch", DEFAULT_BRANCH)
         self.github_user = self.config.get("github_user", "")
         self.sync_state_file = self.config.get("sync_state_file", os.path.join(APP_DIR, "SyncState", "Scuola.json"))
+        self.onboarding_complete = bool(self.config.get("onboarding_complete", False))
+        self.device_id = str(self.config.get("device_id") or uuid.uuid4().hex)
+        self.device_name = str(self.config.get("device_name") or ("Dispositivo " + self.device_id[:6].upper()))
         self.workspace = WorkspaceManager(self.workspace_path, self.vault_path)
 
     def ask_password(self, title, subtitle, confirm=False, min_length=1):
@@ -798,6 +814,7 @@ class SchoolHub:
         self.add_nav("🔒", "Workspace")
         self.add_nav("⚠", "Conflitti")
         self.add_nav("◷", "Attività")
+        self.add_nav("⌘", "Dispositivi")
         self.add_nav("⚙", "Impostazioni")
 
         bottom = tk.Frame(
@@ -981,6 +998,9 @@ class SchoolHub:
 
         elif page == "Attività":
             self.show_activity()
+
+        elif page == "Dispositivi":
+            self.show_devices()
 
         elif page == "Impostazioni":
             self.show_settings()
