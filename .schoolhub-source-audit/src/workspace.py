@@ -288,6 +288,21 @@ class WorkspaceManager:
         except Exception:
             pass
 
+    @staticmethod
+    def _io_path(path):
+        """Return a Windows extended-length Path so long school/media paths work."""
+        p = os.path.abspath(os.fspath(path))
+        if os.name != "nt" or p.startswith("\\\\?\\"):
+            return Path(p)
+        if p.startswith("\\\\"):
+            return Path("\\\\?\\UNC\\" + p.lstrip("\\"))
+        return Path("\\\\?\\" + p)
+
+    def _short_temp_near(self, dest):
+        """Use a short temp basename; never append text to a potentially long filename."""
+        dest_io = self._io_path(dest)
+        return dest_io.parent / (".~sh-" + secrets.token_hex(6))
+
     def _encrypt_file(self, source, dest, key, rel, progress=None):
         """Encrypt any binary file using a streaming AES-GCM container (SHENC2).
 
@@ -296,19 +311,21 @@ class WorkspaceManager:
         """
         source = Path(source)
         dest = Path(dest)
+        source_io = self._io_path(source)
+        dest_io = self._io_path(dest)
         try:
-            total_size = source.stat().st_size
+            total_size = source_io.stat().st_size
         except OSError as exc:
             raise WorkspaceError(f"Impossibile leggere {rel}: {exc}") from exc
 
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dest.with_name(dest.name + ".tmp-" + secrets.token_hex(8))
+        dest_io.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._short_temp_near(dest)
         nonce_prefix = secrets.token_bytes(self.STREAM_NONCE_PREFIX_LEN)
         aad_base = self.FILE_AAD_PREFIX + str(rel).replace("\\", "/").encode("utf-8")
         done = 0
         counter = 0
         try:
-            with source.open("rb") as src, tmp.open("wb") as out:
+            with source_io.open("rb") as src, tmp.open("wb") as out:
                 out.write(self.FILE_MAGIC)
                 out.write(struct.pack(">QI", total_size, self.STREAM_CHUNK_SIZE))
                 out.write(nonce_prefix)
@@ -329,13 +346,13 @@ class WorkspaceManager:
                     counter += 1
                     self._notify_progress(progress, done / max(1, total_size), "Cifratura", rel)
                 # Detect a file changing while it is being encrypted.
-                if done != total_size or source.stat().st_size != total_size:
+                if done != total_size or source_io.stat().st_size != total_size:
                     raise WorkspaceError(
                         f"{rel} è stato modificato durante la cifratura. Nessun dato viene sostituito; chiudi il programma che lo sta modificando e riprova."
                     )
                 out.flush()
                 os.fsync(out.fileno())
-            os.replace(tmp, dest)
+            os.replace(os.fspath(tmp), os.fspath(dest_io))
         except WorkspaceError:
             raise
         except OSError as exc:
@@ -349,8 +366,10 @@ class WorkspaceManager:
     def _decrypt_file(self, source, dest, key, rel, progress=None):
         source = Path(source)
         dest = Path(dest)
+        source_io = self._io_path(source)
+        dest_io = self._io_path(dest)
         try:
-            with source.open("rb") as fh:
+            with source_io.open("rb") as fh:
                 magic = fh.read(len(self.FILE_MAGIC))
         except OSError as exc:
             raise WorkspaceError(f"Impossibile leggere il file cifrato {rel}: {exc}") from exc
@@ -364,7 +383,7 @@ class WorkspaceManager:
         # memory-bounded and visibly advance the progress bar.
         if magic == self.FILE_MAGIC_V1:
             try:
-                total = source.stat().st_size
+                total = source_io.stat().st_size
             except OSError as exc:
                 raise WorkspaceError(f"Impossibile leggere il file cifrato {rel}: {exc}") from exc
 
@@ -373,11 +392,11 @@ class WorkspaceManager:
             if cipher_len < 0:
                 raise WorkspaceError(f"File cifrato non valido: {rel}")
 
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            tmp = dest.with_name(dest.name + ".tmp-" + secrets.token_hex(8))
+            dest_io.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._short_temp_near(dest)
             try:
                 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-                with source.open("rb") as src:
+                with source_io.open("rb") as src:
                     if src.read(len(self.FILE_MAGIC_V1)) != self.FILE_MAGIC_V1:
                         raise WorkspaceError(f"Formato file non riconosciuto: {rel}")
                     nonce = src.read(self.NONCE_LEN)
@@ -419,7 +438,7 @@ class WorkspaceManager:
                             out.write(tail)
                         out.flush()
                         os.fsync(out.fileno())
-                os.replace(tmp, dest)
+                os.replace(os.fspath(tmp), os.fspath(dest_io))
                 self._notify_progress(progress, 1.0, "Decifratura legacy", rel)
                 return
             except WorkspaceError:
@@ -435,10 +454,10 @@ class WorkspaceManager:
         if magic != self.FILE_MAGIC:
             raise WorkspaceError(f"Formato file non riconosciuto: {rel}")
 
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dest.with_name(dest.name + ".tmp-" + secrets.token_hex(8))
+        dest_io.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._short_temp_near(dest)
         try:
-            with source.open("rb") as src, tmp.open("wb") as out:
+            with source_io.open("rb") as src, tmp.open("wb") as out:
                 src.read(len(self.FILE_MAGIC))
                 header = src.read(12)
                 if len(header) != 12:
@@ -477,7 +496,7 @@ class WorkspaceManager:
                     raise WorkspaceError(f"Dati extra non validi nel file cifrato: {rel}")
                 out.flush()
                 os.fsync(out.fileno())
-            os.replace(tmp, dest)
+            os.replace(os.fspath(tmp), os.fspath(dest_io))
         except WorkspaceError:
             raise
         except OSError as exc:
@@ -491,7 +510,8 @@ class WorkspaceManager:
     def _verify_encrypted_file(self, source, key, rel):
         """Authenticate an encrypted file without keeping plaintext on disk."""
         source = Path(source)
-        with source.open("rb") as fh:
+        source_io = self._io_path(source)
+        with source_io.open("rb") as fh:
             magic = fh.read(len(self.FILE_MAGIC))
         aad_base = self.FILE_AAD_PREFIX + str(rel).replace("\\", "/").encode("utf-8")
         if magic == self.FILE_MAGIC_V1:
@@ -499,7 +519,7 @@ class WorkspaceManager:
             # implementation used read_bytes()+AESGCM.decrypt(), which loaded
             # the entire MP3/MP4 into RAM during Vault verification.
             try:
-                total = source.stat().st_size
+                total = source_io.stat().st_size
             except OSError as exc:
                 raise WorkspaceError(f"Impossibile leggere il file cifrato {rel}: {exc}") from exc
             header_len = len(self.FILE_MAGIC_V1) + self.NONCE_LEN
@@ -508,7 +528,7 @@ class WorkspaceManager:
                 raise WorkspaceError(f"File cifrato non valido: {rel}")
             try:
                 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-                with source.open("rb") as src:
+                with source_io.open("rb") as src:
                     if src.read(len(self.FILE_MAGIC_V1)) != self.FILE_MAGIC_V1:
                         raise WorkspaceError(f"Formato file non riconosciuto: {rel}")
                     nonce = src.read(self.NONCE_LEN)
@@ -541,7 +561,7 @@ class WorkspaceManager:
                 raise WorkspaceError(f"Impossibile verificare {rel}: {exc}") from exc
         if magic != self.FILE_MAGIC:
             raise WorkspaceError(f"Formato file non riconosciuto: {rel}")
-        with source.open("rb") as src:
+        with source_io.open("rb") as src:
             src.read(len(self.FILE_MAGIC))
             header = src.read(12)
             if len(header) != 12:
@@ -960,6 +980,66 @@ class WorkspaceManager:
         except Exception:
             shutil.rmtree(staging, ignore_errors=True)
             raise
+
+    def apply_plaintext_paths_from_tree(self, source, paths):
+        """Apply only remotely changed paths to the unlocked Workspace.
+
+        This deliberately avoids renaming/replacing the whole Workspace directory,
+        so editors such as VS Code/Visual Studio may stay open during sync.
+        """
+        if not self.is_unlocked:
+            raise WorkspaceError("Il Workspace è bloccato.")
+        source = Path(source).resolve()
+        if not source.is_dir():
+            raise WorkspaceError("Sorgente Workspace non valida.")
+        workspace = self.workspace_path.resolve()
+
+        for rel_text in sorted(set(paths), key=lambda x: (x.count("/"), x)):
+            rel = Path(*str(rel_text).replace("\\", "/").split("/"))
+            if rel.is_absolute() or ".." in rel.parts:
+                raise WorkspaceError(f"Percorso remoto non valido: {rel_text}")
+            src = source / rel
+            dst = workspace / rel
+            dst_io = self._io_path(dst)
+            try:
+                if src.exists():
+                    if not src.is_file() or src.is_symlink():
+                        raise WorkspaceError(f"Elemento remoto non supportato: {rel_text}")
+                    dst_io.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = self._short_temp_near(dst)
+                    try:
+                        with self._io_path(src).open("rb") as inp, tmp.open("wb") as out:
+                            shutil.copyfileobj(inp, out, length=4 * 1024 * 1024)
+                            out.flush()
+                            os.fsync(out.fileno())
+                        os.replace(os.fspath(tmp), os.fspath(dst_io))
+                    finally:
+                        try: tmp.unlink()
+                        except FileNotFoundError: pass
+                else:
+                    if dst_io.exists():
+                        if dst_io.is_dir():
+                            shutil.rmtree(dst_io)
+                        else:
+                            dst_io.unlink()
+            except WorkspaceError:
+                raise
+            except OSError as exc:
+                raise WorkspaceError(
+                    f"Windows sta usando il file '{rel_text}' e non consente di aggiornarlo. "
+                    "Puoi lasciare Visual/VS Code aperto, ma chiudi quel file specifico e riprova. "
+                    f"Dettaglio: {exc}"
+                ) from exc
+
+        # Clean empty directories left by remote deletions.
+        for current, dirs, files in os.walk(workspace, topdown=False):
+            if Path(current) == workspace:
+                continue
+            try:
+                if not os.listdir(current):
+                    os.rmdir(current)
+            except OSError:
+                pass
 
     def replace_plaintext_from_tree(self, source):
         """Atomically replace the unlocked plaintext Workspace from a trusted tree."""
