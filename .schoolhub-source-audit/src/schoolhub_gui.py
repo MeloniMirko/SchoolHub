@@ -2543,6 +2543,111 @@ class SchoolHub:
                 pass
         return code, out, err
 
+    def _github_host_credential(self):
+        """Return (username, token) from GCM for GitHub, kept in memory only."""
+        os.makedirs(APP_DIR, exist_ok=True)
+        payload = "protocol=https\nhost=github.com\n\n"
+        code, out, err = self.git(
+            ["-c", "credential.https://github.com.useHttpPath=false", "credential", "fill"],
+            cwd=APP_DIR,
+            timeout=120,
+            input_text=payload,
+        )
+        if code != 0:
+            raise WorkspaceError(err or "Impossibile leggere la sessione GitHub da Git Credential Manager.")
+        fields = {}
+        for line in (out or "").splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                fields[key.strip()] = value.strip()
+        username = fields.get("username", "")
+        token = fields.get("password", "")
+        if not token:
+            raise WorkspaceError("Sessione GitHub non disponibile. Esegui prima Accedi a GitHub.")
+        return username, token
+
+    def _github_api_json(self, api_url, token):
+        """Authenticated GitHub API GET. The token is never persisted or logged."""
+        req = urllib.request.Request(
+            api_url,
+            headers={
+                "User-Agent": UPDATE_USER_AGENT,
+                "Accept": "application/vnd.github+json",
+                "Authorization": "Bearer " + token,
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=25) as response:
+                return json.loads(response.read().decode("utf-8")), response.headers
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                raise WorkspaceError("Sessione GitHub scaduta o senza permessi sufficienti.") from exc
+            raise WorkspaceError(f"GitHub API ha risposto HTTP {exc.code}.") from exc
+        except Exception as exc:
+            raise WorkspaceError(f"Impossibile comunicare con GitHub: {exc}") from exc
+
+    def _github_account_and_repositories(self):
+        """Login through GCM, then return account login and all accessible repositories."""
+        self._github_browser_login(APP_DIR)
+        _, token = self._github_host_credential()
+        try:
+            me, _ = self._github_api_json("https://api.github.com/user", token)
+            login = str(me.get("login") or "")
+            repos = []
+            page = 1
+            while page <= 10:
+                url = (
+                    "https://api.github.com/user/repos"
+                    f"?per_page=100&page={page}&sort=updated"
+                    "&affiliation=owner,collaborator,organization_member"
+                )
+                batch, _ = self._github_api_json(url, token)
+                if not isinstance(batch, list):
+                    raise WorkspaceError("Risposta repository GitHub non valida.")
+                repos.extend(batch)
+                if len(batch) < 100:
+                    break
+                page += 1
+            cleaned = []
+            seen = set()
+            for item in repos:
+                full_name = str(item.get("full_name") or "").strip()
+                clone_url = str(item.get("clone_url") or "").strip()
+                if not full_name or not clone_url or full_name.lower() in seen:
+                    continue
+                seen.add(full_name.lower())
+                cleaned.append({
+                    "full_name": full_name,
+                    "clone_url": clone_url,
+                    "private": bool(item.get("private", False)),
+                    "default_branch": str(item.get("default_branch") or "main"),
+                    "permissions": item.get("permissions") if isinstance(item.get("permissions"), dict) else {},
+                })
+            cleaned.sort(key=lambda x: x["full_name"].lower())
+            return login, cleaned
+        finally:
+            token = None
+
+    def _github_repository_branches(self, full_name):
+        _, token = self._github_host_credential()
+        try:
+            quoted = "/".join(urllib.parse.quote(part, safe="") for part in full_name.split("/", 1))
+            branches = []
+            page = 1
+            while page <= 5:
+                url = f"https://api.github.com/repos/{quoted}/branches?per_page=100&page={page}"
+                batch, _ = self._github_api_json(url, token)
+                if not isinstance(batch, list):
+                    raise WorkspaceError("Risposta branch GitHub non valida.")
+                branches.extend(str(item.get("name") or "") for item in batch if item.get("name"))
+                if len(batch) < 100:
+                    break
+                page += 1
+            return sorted(set(branches), key=str.lower)
+        finally:
+            token = None
+
     def _github_repo_parts(self):
         try:
             u = urllib.parse.urlparse(self.remote)
