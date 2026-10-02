@@ -4980,6 +4980,31 @@ def _frozen_self_test(output_path):
         result["checks"]["safe_default_remote"] = (DEFAULT_REMOTE == "")
         if not result["checks"]["safe_default_remote"]:
             raise RuntimeError("Repository dati predefinito non sicuro")
+
+        result["checks"]["update_channel_default"] = (default_config().get("update_channel") == "stable")
+        if not result["checks"]["update_channel_default"]:
+            raise RuntimeError("Canale aggiornamenti predefinito non stable")
+
+        if SchoolHub._error_code("sync", WorkspaceError("Authentication required: push access")) != "SH-GIT-101":
+            raise RuntimeError("Mapping codice errore GitHub non valido")
+        if SchoolHub._error_code("sync", WorkspaceError("file is being used by another process")) != "SH-SYNC-302":
+            raise RuntimeError("Mapping codice errore file bloccato non valido")
+        result["checks"]["support_error_codes"] = True
+
+        probe = object.__new__(SchoolHub)
+        probe.workspace_path = r"C:\\Users\\Mario Rossi\\SchoolHub\\Scuola"
+        probe.vault_path = r"C:\\Users\\Mario Rossi\\SchoolHub\\Vaults\\Scuola.vault"
+        sample = (
+            r"C:\\Users\\Mario Rossi\\SchoolHub\\Scuola\\segreto.txt "
+            "mario.rossi@example.com "
+            "https://github.com/MarioRossi/Scuola.git "
+            "token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
+        )
+        redacted = SchoolHub._redact_diagnostic_text(probe, sample)
+        if "Mario Rossi" in redacted or "mario.rossi@example.com" in redacted or "MarioRossi/Scuola" in redacted or "ghp_" in redacted:
+            raise RuntimeError("Redazione diagnostica dati sensibili non valida")
+        result["checks"]["diagnostic_redaction"] = True
+
         result["ok"] = True
     except Exception as exc:
         result["error"] = f"{type(exc).__name__}: {exc}"
