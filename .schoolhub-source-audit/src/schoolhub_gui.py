@@ -1957,6 +1957,7 @@ class SchoolHub:
             final_files = self._hash_tree(repo)
             self._save_sync_state(final_files)
             self.last_conflicts = []
+            threading.Thread(target=self._publish_device_status_quiet, args=("updated", 0, 0), daemon=True).start()
             if choice == "local":
                 self.write_log(f"✓ Conflitti risolti: mantenuto Workspace per {len(conflicts)} file.")
                 self.finish_status("SINCRONIZZATO", GREEN, "Conflitti risolti: mantenuto Workspace")
@@ -3710,6 +3711,7 @@ class SchoolHub:
                 self.write_log("✓ Repository già sincronizzato." if state is not None else "✓ Prima sincronizzazione: Workspace e GitHub sono già identici.")
                 self.progress_update(100, "Completato", "Tutto aggiornato")
                 self.finish_status("SINCRONIZZATO", GREEN, "Tutto aggiornato")
+                threading.Thread(target=self._publish_device_status_quiet, args=("updated", 0, 0), daemon=True).start()
                 time.sleep(0.25)
                 return
 
@@ -3748,6 +3750,7 @@ class SchoolHub:
 
             self._save_sync_state(final_files)
             self.last_conflicts = []
+            threading.Thread(target=self._publish_device_status_quiet, args=("updated", 0, 0), daemon=True).start()
             if local_only and remote_only:
                 self.write_log(f"↔ Sync completata: {len(local_only)} modifiche locali + {len(remote_only)} modifiche GitHub unite senza conflitti.")
             elif local_only:
