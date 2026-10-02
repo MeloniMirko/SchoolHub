@@ -448,7 +448,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "schoolhub-v2.6.0"
-          $notes = "SchoolHub 2.6.0 Maintenance + Support Release: aggiunge SchoolHub-Setup.exe con installazione Windows guidata per utente, onboarding al primo avvio con login GitHub tramite GCM e selezione repository/branch dall account, configurazione guidata richiamabile dalle Impostazioni e pannello Dispositivi basato sul branch separato schoolhub-status. I token restano in Git Credential Manager e non vengono salvati nei file SchoolHub. Mantiene Vault, updater, Git LFS e compatibilita 2.4.x."
+          $notes = "SchoolHub 2.6.0 Maintenance + Support Release: aggiornamenti tramite SchoolHub-Setup.exe con backup tecnico automatico, canali Stable/Beta, diagnostica ZIP sanificata, Ripara SchoolHub non distruttivo, codici errore SH-*, pannello Dispositivi con ONLINE/ultimo contatto e avviso versioni obsolete, metadati Windows completi e disinstallazione che conserva Vault e dati salvo doppia conferma esplicita. Mantiene onboarding GitHub, Git LFS, editor-safe sync e compatibilita 2.4/2.5."
           if (gh release view $tag --repo "$env:GITHUB_REPOSITORY" *> $null) {
             gh release upload $tag ".\dist\SchoolHub.exe#SchoolHub.exe" ".\dist\SchoolHub.exe.sha256.txt#SchoolHub.exe.sha256.txt" ".\dist\SchoolHub-Setup.exe#SchoolHub-Setup.exe" ".\dist\SchoolHub-Setup.exe.sha256.txt#SchoolHub-Setup.exe.sha256.txt" --clobber --repo "$env:GITHUB_REPOSITORY"
             gh release edit $tag --title "SchoolHub 2.6.0 Maintenance + Support Release" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
