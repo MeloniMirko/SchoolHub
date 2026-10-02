@@ -3211,9 +3211,10 @@ class SchoolHub:
             )
         self.write_log("✓ Accesso GitHub completato. Riprovo il push.")
 
-    def _push_with_auth_retry(self, repo):
+    def _push_with_auth_retry(self, repo, branch_name=None):
         """Push once, authenticate via GCM on auth failures, then retry exactly once."""
-        args = ["push", "-u", "origin", self.branch]
+        target_branch = branch_name or self.branch
+        args = ["push", "-u", "origin", target_branch]
         code, out, err = self.git(args, cwd=repo)
         if code == 0:
             return out
