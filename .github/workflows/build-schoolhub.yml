@@ -206,6 +206,7 @@ jobs:
           gui = (root/'src'/'schoolhub_gui.py').read_text(encoding='utf-8')
           workspace = (root/'src'/'workspace.py').read_text(encoding='utf-8')
           spec = (root/'SchoolHub.spec').read_text(encoding='utf-8')
+          version_info = (root/'version_info.txt').read_text(encoding='utf-8')
           installer = (root/'.schoolhub-source-audit'/'installer'/'SchoolHub.iss').read_text(encoding='utf-8')
 
           checks = {
@@ -247,7 +248,15 @@ jobs:
               'device status branch': 'DEVICE_STATUS_BRANCH = "schoolhub-status"' in gui,
               'device dashboard': 'def show_devices' in gui and 'def _publish_device_record' in gui and 'def _read_device_records' in gui,
               'device privacy': 'username Windows' in gui and 'device_id' in gui,
+              'device online outdated': 'def _device_presence' in gui and 'AGGIORNAMENTO RICHIESTO' in gui,
               'windows installer': 'WizardStyle=modern' in installer and 'DefaultDirName={localappdata}\\Programs\\SchoolHub' in installer,
+              'setup based updater': 'SchoolHub-Setup.exe' in gui and 'def _create_preupdate_backup' in gui and '/VERYSILENT' in gui,
+              'stable beta channels': '"update_channel": "stable"' in gui and 'values=["stable", "beta"]' in gui and 'RELEASES_API' in gui,
+              'diagnostic export': 'def export_diagnostics' in gui and 'schoolhub-sanitized.log' in gui and '_redact_diagnostic_text' in gui,
+              'safe repair': 'def repair_schoolhub' in gui and 'NON verranno eliminati' in gui,
+              'support error codes': 'SH-GIT-101' in gui and 'SH-SYNC-302' in gui and 'SH-UPD-401' in gui,
+              'windows file metadata': 'version="version_info.txt"' in spec and "ProductVersion', u'2.6.0'" in version_info,
+              'safe uninstall': 'CurUninstallStepChanged' in installer and 'MB_DEFBUTTON2' in installer,
               'lazy crypto': 'def _aesgcm()' in workspace and 'AESGCM(key)' not in workspace,
               'lean hidden imports': 'hiddenimports = []' in spec,
               'boot splash': 'Splash(' in spec and 'splash.binaries' in spec,
