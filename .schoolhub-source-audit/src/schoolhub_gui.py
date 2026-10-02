@@ -28,9 +28,9 @@ CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 LOG_FILE = os.path.join(APP_DIR, "schoolhub.log")
 SYNC_STATE_FILE = os.path.join(APP_DIR, "sync_state.json")
 
-APP_VERSION = "2.4.9"
+APP_VERSION = "2.4.10"
 RELEASE_API = "https://api.github.com/repos/MeloniMirko/SchoolHub/releases/latest"
-UPDATE_USER_AGENT = "SchoolHub-Updater/2.4.9"
+UPDATE_USER_AGENT = "SchoolHub-Updater/2.4.10"
 UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 UPDATE_STAMP_FILE = os.path.join(APP_DIR, "last_update_check.txt")
 GIT_TIMEOUT_SECONDS = 180
@@ -88,6 +88,8 @@ def bundled_git_info():
                     ("filter.lfs.clean", "git-lfs clean -- %f"),
                     ("filter.lfs.required", "true"),
                 ])
+            # Keep long school/media paths working in bundled Git for Windows.
+            git_config.append(("core.longpaths", "true"))
             if git_config:
                 env["GIT_CONFIG_COUNT"] = str(len(git_config))
                 for idx, (key, value) in enumerate(git_config):
@@ -1917,7 +1919,10 @@ class SchoolHub:
             if paths_to_take_local:
                 self._apply_paths(source, repo, local_files, paths_to_take_local)
 
-            self._persist_sync_tree(repo, password, temp_root)
+            paths_from_remote = set(remote_only)
+            if choice == "remote":
+                paths_from_remote.update(conflicts)
+            self._persist_sync_tree(repo, password, temp_root, paths_from_remote)
 
             self._ensure_git_identity(repo)
             code, _, err = self.git(["add", "-A"], cwd=repo)
@@ -2776,15 +2781,17 @@ class SchoolHub:
             except OSError:
                 pass
 
-    def _persist_sync_tree(self, source, password, temp_root):
-        """Persist only user files; Git metadata such as .gitattributes stays in the temp repo."""
+    def _persist_sync_tree(self, source, password, temp_root, remote_paths=None):
+        """Persist merged user files without replacing the whole live Workspace."""
         user_tree = os.path.join(temp_root, "merged-user-tree")
         if os.path.exists(user_tree):
             shutil.rmtree(user_tree, ignore_errors=True)
         self._copy_tree(source, user_tree)
         expected = self._hash_tree(user_tree)
         if self.workspace.is_unlocked:
-            self.workspace.replace_plaintext_from_tree(user_tree)
+            remote_paths = list(remote_paths or [])
+            if remote_paths:
+                self.workspace.apply_plaintext_paths_from_tree(user_tree, remote_paths)
             self.workspace.save_unlocked_to_vault(user_tree)
             actual = self._hash_tree(self.workspace.get_unlocked_path())
         else:
@@ -2928,8 +2935,8 @@ class SchoolHub:
             if local_only:
                 self._apply_paths(source, repo, local_files, local_only)
 
-            self.progress_update(64, "Aggiornamento Vault", "Applicazione e cifratura del risultato")
-            self._persist_sync_tree(repo, password, temp_root)
+            self.progress_update(64, "Aggiornamento Vault", "Cifratura risultato · aggiornamento solo file remoti")
+            self._persist_sync_tree(repo, password, temp_root, remote_only)
 
             if local_only:
                 self.progress_update(78, "Commit", "Preparazione modifiche Git + LFS media")
@@ -3589,6 +3596,20 @@ def _frozen_self_test(output_path):
         with open(os.path.join(ws, "selftest.mp4"), "wb") as fh:
             fh.write(b"\x00\x00\x00\x18ftypmp42" + (b"SchoolHubMedia" * 400000))
         wm = WorkspaceManager(ws, vault)
+
+        long_rel = os.path.join(
+            "PCTO", "Corso Smart Learning", "Video Smart Learning",
+            "ElevenLabs_2026-05-12T13_32_03_Manuela - Warm, Energetic and Swift_"
+            + ("pvc_sp95_s27_sb100_se58_b_m2_" * 4) + ".mp3",
+        )
+        long_plain = wm._io_path(os.path.join(ws, long_rel))
+        long_plain.parent.mkdir(parents=True, exist_ok=True)
+        with long_plain.open("wb") as fh:
+            fh.write(b"ID3" + (b"LongPathSchoolHub" * 20000))
+        simulated_long_vault = os.path.join(vault + ".syncvault-1234567890abcdef", "files", long_rel)
+        if len(os.path.abspath(simulated_long_vault)) <= 260:
+            raise RuntimeError("Long-path self-test non supera MAX_PATH")
+
         password = "SchoolHub-SelfTest-Only-42!"
         wm.create(password)
         media_enc = os.path.join(vault, "files", "selftest.mp4")
@@ -3621,6 +3642,10 @@ def _frozen_self_test(output_path):
                 raise RuntimeError("Vault round-trip non valido")
         if os.path.getsize(os.path.join(ws, "selftest.mp4")) < 4_000_000:
             raise RuntimeError("Round-trip media non valido")
+        long_restored = wm._io_path(os.path.join(ws, long_rel))
+        if not long_restored.is_file() or long_restored.stat().st_size < 100000:
+            raise RuntimeError("Round-trip percorso lungo MP3 non valido")
+        result["checks"]["windows_long_media_path"] = True
 
         wm.session_lock()
         if wm.is_unlocked or not wm.has_plaintext:
@@ -3631,6 +3656,22 @@ def _frozen_self_test(output_path):
         if not wm.is_unlocked:
             raise RuntimeError("Sblocco rapido non valido")
         result["checks"]["instant_unlock_seconds"] = round(fast_elapsed, 3)
+
+        marker_file = os.path.join(ws, "editor-open-marker.txt")
+        with open(marker_file, "w", encoding="utf-8") as fh:
+            fh.write("old")
+        source_tree = os.path.join(temp_root, "remote-merge")
+        shutil.copytree(ws, source_tree)
+        with open(os.path.join(source_tree, "editor-open-marker.txt"), "w", encoding="utf-8") as fh:
+            fh.write("new")
+        workspace_identity = os.path.abspath(ws)
+        wm.apply_plaintext_paths_from_tree(source_tree, ["editor-open-marker.txt"])
+        if os.path.abspath(wm.get_unlocked_path()) != workspace_identity:
+            raise RuntimeError("La sync incrementale ha sostituito la cartella Workspace")
+        with open(marker_file, "r", encoding="utf-8") as fh:
+            if fh.read() != "new":
+                raise RuntimeError("Aggiornamento incrementale file remoto non valido")
+        result["checks"]["editor_safe_incremental_sync"] = True
 
         wm.lock(password)
         result["checks"]["vault_roundtrip"] = True
