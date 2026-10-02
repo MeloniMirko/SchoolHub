@@ -2185,6 +2185,291 @@ class SchoolHub:
         self.load_recent_log()
 
     # ========================================================
+    # CONNECTED DEVICES
+    # ========================================================
+
+    def _current_remote_data_head(self):
+        if not self.remote:
+            return ""
+        os.makedirs(APP_DIR, exist_ok=True)
+        code, out, err = self.git(
+            ["ls-remote", self._git_remote_for_auth(), f"refs/heads/{self.branch}"],
+            cwd=APP_DIR,
+            timeout=60,
+        )
+        if code != 0:
+            raise WorkspaceError(err or out or "Impossibile leggere lo stato del branch GitHub.")
+        parts = (out or "").split()
+        return parts[0] if parts else ""
+
+    def _open_status_repo(self, temp_root):
+        """Open the dedicated status branch without touching the data branch."""
+        repo = os.path.join(temp_root, "status-repo")
+        remote = self._git_remote_for_auth()
+        code, out, err = self.git(
+            ["ls-remote", "--heads", remote, f"refs/heads/{DEVICE_STATUS_BRANCH}"],
+            cwd=temp_root,
+            timeout=60,
+        )
+        if code != 0:
+            raise WorkspaceError(err or out or "Impossibile controllare il branch dispositivi.")
+
+        exists = bool((out or "").strip())
+        if exists:
+            code, out, err = self.git(
+                ["clone", "--depth", "1", "--branch", DEVICE_STATUS_BRANCH, "--single-branch", remote, repo],
+                cwd=temp_root,
+                timeout=120,
+            )
+            if code != 0:
+                raise WorkspaceError(err or out or "Impossibile scaricare lo stato dispositivi.")
+        else:
+            os.makedirs(repo, exist_ok=True)
+            code, out, err = self.git(["init"], cwd=repo)
+            if code != 0:
+                raise WorkspaceError(err or out or "Impossibile inizializzare lo stato dispositivi.")
+            self.git(["remote", "add", "origin", remote], cwd=repo)
+            code, out, err = self.git(["checkout", "--orphan", DEVICE_STATUS_BRANCH], cwd=repo)
+            if code != 0:
+                raise WorkspaceError(err or out or "Impossibile creare il branch dispositivi.")
+
+        self.git(["config", "credential.useHttpPath", "true"], cwd=repo)
+        self._ensure_git_identity(repo)
+        return repo, exists
+
+    @staticmethod
+    def _device_state_name(state):
+        names = {
+            "updated": "AGGIORNATO",
+            "upload": "DEVE CARICARE",
+            "download": "DEVE SCARICARE",
+            "both": "CARICARE + SCARICARE",
+            "conflict": "CONFLITTO",
+            "locked": "WORKSPACE BLOCCATO",
+            "unknown": "STATO NON DISPONIBILE",
+        }
+        return names.get(state, str(state or "unknown").upper())
+
+    def _local_device_state(self):
+        if not self.workspace.exists:
+            return "unknown", 0, 0
+        if not self.workspace.is_unlocked:
+            return "locked", 0, 0
+        local, remote, _ = self.get_status()
+        if local is None:
+            return "unknown", 0, 0
+        local = int(local or 0)
+        remote = int(remote or 0)
+        if self.last_conflicts:
+            state = "conflict"
+        elif local and remote:
+            state = "both"
+        elif local:
+            state = "upload"
+        elif remote:
+            state = "download"
+        else:
+            state = "updated"
+        return state, local, remote
+
+    def _build_device_record(self, state, local_pending, remote_pending, data_head):
+        return {
+            "schema": 1,
+            "device_id": self.device_id,
+            "name": self.device_name[:80],
+            "app_version": APP_VERSION,
+            "data_branch": self.branch,
+            "data_head": data_head or "",
+            "state": state,
+            "local_pending": int(local_pending or 0),
+            "remote_pending": int(remote_pending or 0),
+            "last_seen_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        }
+
+    def _publish_device_record(self, record):
+        if not self.remote:
+            return
+        temp_root = tempfile.mkdtemp(prefix="schoolhub-devices-")
+        try:
+            repo, branch_existed = self._open_status_repo(temp_root)
+            devices_dir = os.path.join(repo, "devices")
+            os.makedirs(devices_dir, exist_ok=True)
+            target = os.path.join(devices_dir, self.device_id + ".json")
+            tmp = target + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(record, fh, indent=2, sort_keys=True, ensure_ascii=False)
+            os.replace(tmp, target)
+
+            code, out, err = self.git(["add", "devices"], cwd=repo)
+            if code != 0:
+                raise WorkspaceError(err or out or "git add stato dispositivi fallito.")
+            code, out, err = self.git(["commit", "-m", f"SchoolHub device {self.device_id[:8]}"], cwd=repo)
+            combined = (out + "\n" + err).lower()
+            if code != 0 and "nothing to commit" not in combined:
+                raise WorkspaceError(err or out or "Commit stato dispositivi fallito.")
+
+            if branch_existed:
+                code, out, err = self.git(["pull", "--rebase", "origin", DEVICE_STATUS_BRANCH], cwd=repo, timeout=90)
+                if code != 0:
+                    raise WorkspaceError(err or out or "Aggiornamento branch dispositivi fallito.")
+
+            try:
+                self._push_with_auth_retry(repo, DEVICE_STATUS_BRANCH)
+            except WorkspaceError as exc:
+                text = str(exc).lower()
+                if "non-fast-forward" in text or "fetch first" in text or "rejected" in text:
+                    self.git(["fetch", "origin", DEVICE_STATUS_BRANCH], cwd=repo, timeout=90)
+                    code, out, err = self.git(["rebase", f"origin/{DEVICE_STATUS_BRANCH}"], cwd=repo, timeout=90)
+                    if code != 0:
+                        self.git(["rebase", "--abort"], cwd=repo)
+                        raise WorkspaceError(err or out or "Conflitto nel branch dispositivi.") from exc
+                    self._push_with_auth_retry(repo, DEVICE_STATUS_BRANCH)
+                else:
+                    raise
+        finally:
+            shutil.rmtree(temp_root, ignore_errors=True)
+
+    def _read_device_records(self):
+        if not self.remote:
+            return []
+        temp_root = tempfile.mkdtemp(prefix="schoolhub-devices-read-")
+        try:
+            repo, exists = self._open_status_repo(temp_root)
+            if not exists:
+                return []
+            devices_dir = os.path.join(repo, "devices")
+            records = []
+            if os.path.isdir(devices_dir):
+                for name in os.listdir(devices_dir):
+                    if not name.lower().endswith(".json"):
+                        continue
+                    path = os.path.join(devices_dir, name)
+                    try:
+                        with open(path, "r", encoding="utf-8") as fh:
+                            data = json.load(fh)
+                        if isinstance(data, dict) and data.get("device_id"):
+                            records.append(data)
+                    except Exception:
+                        continue
+            return records
+        finally:
+            shutil.rmtree(temp_root, ignore_errors=True)
+
+    def _effective_device_state(self, record, current_head):
+        state = str(record.get("state") or "unknown")
+        record_head = str(record.get("data_head") or "")
+        if str(record.get("data_branch") or "") != self.branch:
+            return "unknown"
+        if current_head and record_head and current_head != record_head:
+            if state in ("upload", "both", "conflict"):
+                return "both" if state != "conflict" else "conflict"
+            return "download"
+        return state
+
+    def _publish_device_status_quiet(self, state="updated", local_pending=0, remote_pending=0, data_head=None):
+        try:
+            if not self.remote:
+                return
+            head = data_head if data_head is not None else self._current_remote_data_head()
+            self._publish_device_record(self._build_device_record(state, local_pending, remote_pending, head))
+        except Exception as exc:
+            self.write_log(f"⚠ Stato dispositivo non pubblicato: {exc}")
+
+    def show_devices(self):
+        self.clear_content()
+        generation = self.page_generation
+        self.section_title("Dispositivi", "Stato dei PC collegati allo stesso repository SchoolHub.")
+
+        controls = tk.Frame(self.content, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
+        controls.pack(fill="x", pady=(14, 12))
+        tk.Label(controls, text="QUESTO DISPOSITIVO", font=("Segoe UI",9,"bold"), fg=CYAN, bg=PANEL).pack(anchor="w", padx=20, pady=(16,5))
+
+        name_row = tk.Frame(controls, bg=PANEL)
+        name_row.pack(fill="x", padx=20, pady=(0,10))
+        device_name_var = tk.StringVar(value=self.device_name)
+        device_entry = tk.Entry(name_row, textvariable=device_name_var, bg=PANEL2, fg=TEXT, insertbackground=TEXT, relief="flat", font=("Segoe UI",10))
+        device_entry.pack(side="left", fill="x", expand=True, ipady=8)
+
+        def save_device_name():
+            name = device_name_var.get().strip()
+            if not name:
+                return
+            self.device_name = name[:80]
+            self.config["device_name"] = self.device_name
+            self.config["device_id"] = self.device_id
+            save_config(self.config)
+            refresh_devices()
+
+        tk.Button(name_row, text="SALVA NOME", command=save_device_name, bg=PANEL3, fg=TEXT, activebackground=BLUE, activeforeground="white", relief="flat", bd=0, font=("Segoe UI",9,"bold"), cursor="hand2", padx=14, pady=9).pack(side="left", padx=(10,0))
+        tk.Button(name_row, text="AGGIORNA", command=lambda: refresh_devices(), bg=BLUE, fg="white", activebackground=BLUE, activeforeground="white", relief="flat", bd=0, font=("Segoe UI",9,"bold"), cursor="hand2", padx=16, pady=9).pack(side="left", padx=(8,0))
+
+        tk.Label(
+            controls,
+            text="Lo stato usa il branch separato 'schoolhub-status'. Non vengono salvati password, token, username Windows o seriali. Se il repository è pubblico, alias dispositivo e stato sono visibili nel branch stato.",
+            font=("Segoe UI",8),
+            fg=MUTED,
+            bg=PANEL,
+            wraplength=800,
+            justify="left",
+        ).pack(anchor="w", padx=20, pady=(0,16))
+
+        list_card = tk.Frame(self.content, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
+        list_card.pack(fill="both", expand=True)
+        loading = tk.Label(list_card, text="Caricamento dispositivi...", font=("Segoe UI",10,"bold"), fg=YELLOW, bg=PANEL)
+        loading.pack(anchor="w", padx=20, pady=20)
+
+        def render(records, current_head, error=None):
+            if not self.running or generation != self.page_generation or not list_card.winfo_exists():
+                return
+            for widget in list_card.winfo_children():
+                widget.destroy()
+            if error:
+                tk.Label(list_card, text=error, font=("Segoe UI",9), fg=RED, bg=PANEL, wraplength=800, justify="left").pack(anchor="w", padx=20, pady=20)
+                return
+            if not records:
+                tk.Label(list_card, text="Nessun dispositivo registrato.", font=("Segoe UI",10), fg=MUTED, bg=PANEL).pack(anchor="w", padx=20, pady=20)
+                return
+
+            records = sorted(records, key=lambda r: (0 if r.get("device_id") == self.device_id else 1, str(r.get("name") or "").lower()))
+            for index, record in enumerate(records):
+                state = self._effective_device_state(record, current_head)
+                row = tk.Frame(list_card, bg=PANEL2 if index % 2 == 0 else PANEL)
+                row.pack(fill="x", padx=12, pady=(12 if index == 0 else 0, 0))
+                left = tk.Frame(row, bg=row["bg"])
+                left.pack(side="left", fill="x", expand=True, padx=16, pady=13)
+                title = str(record.get("name") or ("Dispositivo " + str(record.get("device_id",""))[:6]))
+                if record.get("device_id") == self.device_id:
+                    title += "  ·  QUESTO PC"
+                tk.Label(left, text=title, font=("Segoe UI",10,"bold"), fg=TEXT, bg=row["bg"]).pack(anchor="w")
+                detail = f"Ultimo contatto: {record.get('last_seen_utc','-')}   ·   SchoolHub {record.get('app_version','?')}"
+                tk.Label(left, text=detail, font=("Segoe UI",8), fg=MUTED, bg=row["bg"]).pack(anchor="w", pady=(3,0))
+                color = GREEN if state == "updated" else (RED if state == "conflict" else YELLOW)
+                tk.Label(row, text=self._device_state_name(state), font=("Segoe UI",9,"bold"), fg=color, bg=row["bg"]).pack(side="right", padx=18)
+
+        def worker():
+            try:
+                if not self.remote:
+                    raise WorkspaceError("Configura prima GitHub nelle Impostazioni.")
+                current_head = self._current_remote_data_head()
+                state, local_pending, remote_pending = self._local_device_state()
+                record = self._build_device_record(state, local_pending, remote_pending, current_head)
+                self._publish_device_record(record)
+                records = self._read_device_records()
+                self.root.after(0, lambda: render(records, current_head))
+            except Exception as exc:
+                self.root.after(0, lambda text=str(exc): render([], "", text))
+
+        def refresh_devices():
+            if generation != self.page_generation:
+                return
+            for widget in list_card.winfo_children():
+                widget.destroy()
+            tk.Label(list_card, text="Aggiornamento stato dispositivi...", font=("Segoe UI",10,"bold"), fg=YELLOW, bg=PANEL).pack(anchor="w", padx=20, pady=20)
+            threading.Thread(target=worker, daemon=True).start()
+
+        refresh_devices()
+
+    # ========================================================
     # GUIDED GITHUB SETUP
     # ========================================================
 
