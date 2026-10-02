@@ -2496,7 +2496,7 @@ class SchoolHub:
     # GIT / ENCRYPTED WORKSPACE SYNC
     # ========================================================
 
-    def git(self, args, cwd=None, timeout=GIT_TIMEOUT_SECONDS):
+    def git(self, args, cwd=None, timeout=GIT_TIMEOUT_SECONDS, input_text=None):
         """Run Git hidden with a hard timeout so SchoolHub cannot sync forever."""
         if not cwd:
             return 1, "", "Repository temporaneo non disponibile."
@@ -2527,7 +2527,7 @@ class SchoolHub:
             except Exception as exc:
                 return 1, "", f"Impossibile avviare Git: {exc}"
 
-        code, out, err = run_git(args)
+        code, out, err = run_git(args, input_text=input_text)
         if code == 0:
             return code, out, err
 
