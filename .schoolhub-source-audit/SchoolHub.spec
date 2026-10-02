@@ -28,6 +28,7 @@ exe = EXE(
     [],
     name="SchoolHub",
     icon="schoolhub.ico",
+    version="version_info.txt",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
