@@ -2185,6 +2185,298 @@ class SchoolHub:
         self.load_recent_log()
 
     # ========================================================
+    # GUIDED GITHUB SETUP
+    # ========================================================
+
+    def show_github_setup(self, first_run=False):
+        if self.sync_running or self.workspace_busy:
+            messagebox.showinfo("SchoolHub", "Termina prima l'operazione in corso.", parent=self.root)
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("Configura SchoolHub")
+        win.configure(bg=BG)
+        win.geometry("760x610")
+        win.minsize(700, 560)
+        win.transient(self.root)
+        try:
+            win.attributes("-topmost", True)
+        except Exception:
+            pass
+
+        state = {"repos": [], "display_map": {}, "login": self.github_user or ""}
+        shell = tk.Frame(win, bg=BG)
+        shell.pack(fill="both", expand=True, padx=32, pady=26)
+
+        tk.Label(
+            shell,
+            text="CONFIGURAZIONE GUIDATA",
+            font=("Segoe UI", 22, "bold"),
+            fg=TEXT,
+            bg=BG,
+        ).pack(anchor="w")
+        tk.Label(
+            shell,
+            text="Accedi a GitHub, scegli il repository e poi il branch. Nessun token viene salvato da SchoolHub.",
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg=BG,
+            wraplength=680,
+            justify="left",
+        ).pack(anchor="w", pady=(4, 18))
+
+        card = tk.Frame(shell, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
+        card.pack(fill="both", expand=True)
+
+        account_status = tk.Label(
+            card,
+            text="1. Accedi con il tuo account GitHub",
+            font=("Segoe UI", 11, "bold"),
+            fg=TEXT,
+            bg=PANEL,
+        )
+        account_status.pack(anchor="w", padx=22, pady=(20, 8))
+
+        login_button = tk.Button(
+            card,
+            text="ACCEDI A GITHUB",
+            bg=BLUE,
+            fg="white",
+            activebackground=BLUE,
+            activeforeground="white",
+            relief="flat",
+            bd=0,
+            font=("Segoe UI", 10, "bold"),
+            cursor="hand2",
+            padx=20,
+            pady=10,
+        )
+        login_button.pack(anchor="w", padx=22)
+
+        tk.Label(card, text="2. Repository", font=("Segoe UI",9,"bold"), fg=MUTED, bg=PANEL).pack(anchor="w", padx=22, pady=(20,5))
+        repo_var = tk.StringVar()
+        repo_box = ttk.Combobox(card, textvariable=repo_var, state="disabled", font=("Segoe UI", 10))
+        repo_box.pack(fill="x", padx=22, ipady=5)
+
+        tk.Label(card, text="3. Branch", font=("Segoe UI",9,"bold"), fg=MUTED, bg=PANEL).pack(anchor="w", padx=22, pady=(16,5))
+        branch_var = tk.StringVar()
+        branch_box = ttk.Combobox(card, textvariable=branch_var, state="disabled", font=("Segoe UI", 10))
+        branch_box.pack(fill="x", padx=22, ipady=5)
+
+        options = tk.Frame(card, bg=PANEL)
+        options.pack(fill="x", padx=22, pady=(18, 4))
+        auto_var = tk.BooleanVar(value=self.auto_sync_enabled)
+        start_var = tk.BooleanVar(value=self.auto_start_enabled)
+        tk.Checkbutton(options, text="Sincronizzazione automatica", variable=auto_var, bg=PANEL, fg=TEXT, selectcolor=PANEL2, activebackground=PANEL, activeforeground=TEXT).pack(anchor="w")
+        tk.Checkbutton(options, text="Avvia SchoolHub con Windows", variable=start_var, bg=PANEL, fg=TEXT, selectcolor=PANEL2, activebackground=PANEL, activeforeground=TEXT).pack(anchor="w", pady=(5,0))
+
+        tk.Label(card, text="Nome di questo dispositivo", font=("Segoe UI",9,"bold"), fg=MUTED, bg=PANEL).pack(anchor="w", padx=22, pady=(14,5))
+        device_var = tk.StringVar(value=self.device_name)
+        device_entry = tk.Entry(card, textvariable=device_var, bg=PANEL2, fg=TEXT, insertbackground=TEXT, relief="flat", font=("Segoe UI",10))
+        device_entry.pack(fill="x", padx=22, ipady=7)
+
+        status = tk.Label(card, text="", font=("Segoe UI",8,"bold"), fg=YELLOW, bg=PANEL, wraplength=660, justify="left")
+        status.pack(anchor="w", padx=22, pady=(12,6))
+
+        footer = tk.Frame(card, bg=PANEL)
+        footer.pack(fill="x", padx=22, pady=(8,20))
+
+        save_button = tk.Button(
+            footer,
+            text="SALVA E CONTINUA",
+            state="disabled",
+            bg=GREEN,
+            fg="#06120b",
+            activebackground=GREEN,
+            activeforeground="#06120b",
+            disabledforeground=MUTED,
+            relief="flat",
+            bd=0,
+            font=("Segoe UI",10,"bold"),
+            cursor="hand2",
+            padx=22,
+            pady=10,
+        )
+        save_button.pack(side="right")
+
+        def set_busy(text_value):
+            status.configure(text=text_value, fg=YELLOW)
+            login_button.configure(state="disabled")
+            repo_box.configure(state="disabled")
+            branch_box.configure(state="disabled")
+            save_button.configure(state="disabled")
+
+        def finish_login(login, repos):
+            if not win.winfo_exists():
+                return
+            state["login"] = login
+            state["repos"] = repos
+            state["display_map"] = {}
+            displays = []
+            for item in repos:
+                label = item["full_name"] + ("  [privato]" if item["private"] else "  [pubblico]")
+                state["display_map"][label] = item
+                displays.append(label)
+            account_status.configure(text=f"✓ GitHub: {login or 'account collegato'}", fg=GREEN)
+            repo_box.configure(values=displays, state="readonly")
+            login_button.configure(text="CAMBIA ACCOUNT", state="normal")
+            status.configure(text=f"{len(displays)} repository disponibili. Scegline uno.", fg=GREEN)
+            if displays:
+                preferred = None
+                for label, item in state["display_map"].items():
+                    if item["clone_url"].rstrip("/") == (self.remote or "").rstrip("/"):
+                        preferred = label
+                        break
+                repo_var.set(preferred or displays[0])
+                load_branches()
+            else:
+                status.configure(text="Nessun repository disponibile per questo account.", fg=RED)
+
+        def login_worker():
+            try:
+                login, repos = self._github_account_and_repositories()
+                self.root.after(0, lambda: finish_login(login, repos))
+            except Exception as exc:
+                self.root.after(0, lambda text=str(exc): (
+                    status.configure(text=text, fg=RED),
+                    login_button.configure(state="normal"),
+                ))
+
+        def do_login():
+            set_busy("Apro GitHub nel browser. Completa l'accesso...")
+            threading.Thread(target=login_worker, daemon=True).start()
+
+        def finish_branches(branches, default_branch):
+            if not win.winfo_exists():
+                return
+            values = branches or [default_branch or "main"]
+            branch_box.configure(values=values, state="readonly")
+            branch_var.set(default_branch if default_branch in values else values[0])
+            repo_box.configure(state="readonly")
+            login_button.configure(state="normal")
+            save_button.configure(state="normal")
+            status.configure(text="Repository e branch pronti. Premi SALVA E CONTINUA.", fg=GREEN)
+
+        def branches_worker(full_name, default_branch):
+            try:
+                branches = self._github_repository_branches(full_name)
+                self.root.after(0, lambda: finish_branches(branches, default_branch))
+            except Exception as exc:
+                self.root.after(0, lambda text=str(exc): (
+                    status.configure(text=text, fg=RED),
+                    repo_box.configure(state="readonly"),
+                    login_button.configure(state="normal"),
+                ))
+
+        def load_branches(_event=None):
+            item = state["display_map"].get(repo_var.get())
+            if not item:
+                return
+            set_busy("Carico i branch del repository...")
+            repo_box.configure(state="disabled")
+            threading.Thread(
+                target=branches_worker,
+                args=(item["full_name"], item["default_branch"]),
+                daemon=True,
+            ).start()
+
+        def save_guided():
+            item = state["display_map"].get(repo_var.get())
+            branch_name = branch_var.get().strip()
+            if not item or not branch_name:
+                status.configure(text="Seleziona repository e branch.", fg=RED)
+                return
+            name = device_var.get().strip() or ("Dispositivo " + self.device_id[:6].upper())
+            candidate = dict(self.config)
+            candidate.update({
+                "remote": item["clone_url"],
+                "branch": branch_name,
+                "github_user": state["login"],
+                "auto_sync": bool(auto_var.get()),
+                "auto_start": bool(start_var.get()),
+                "onboarding_complete": True,
+                "device_id": self.device_id,
+                "device_name": name[:80],
+            })
+            try:
+                save_config(candidate)
+                verified = load_config()
+                for key in ("remote", "branch", "github_user", "device_id", "device_name"):
+                    if verified.get(key) != candidate.get(key):
+                        raise WorkspaceError(f"Verifica salvataggio fallita: {key}")
+                self.config = verified
+                self.remote = verified["remote"]
+                self.branch = verified["branch"]
+                self.github_user = verified.get("github_user", "")
+                self.git_enabled = bool(self.remote)
+                self.auto_sync_enabled = bool(verified.get("auto_sync", False))
+                self.auto_start_enabled = bool(verified.get("auto_start", False))
+                self.onboarding_complete = True
+                self.device_name = verified.get("device_name", name)
+                startup_ok = self.set_windows_startup(self.auto_start_enabled)
+                if self.auto_start_enabled and not startup_ok:
+                    self.auto_start_enabled = False
+                    self.config["auto_start"] = False
+                    save_config(self.config)
+                self.schedule_auto_sync()
+                win.destroy()
+                self.navigate("Home")
+                messagebox.showinfo(
+                    "SchoolHub",
+                    f"GitHub configurato correttamente.\n\n{item['full_name']}\nBranch: {branch_name}",
+                    parent=self.root,
+                )
+            except Exception as exc:
+                status.configure(text=f"Salvataggio fallito: {exc}", fg=RED)
+
+        def local_only():
+            self.config["onboarding_complete"] = True
+            self.config["device_name"] = device_var.get().strip() or self.device_name
+            save_config(self.config)
+            self.onboarding_complete = True
+            self.device_name = self.config["device_name"]
+            win.destroy()
+
+        login_button.configure(command=do_login)
+        repo_box.bind("<<ComboboxSelected>>", load_branches)
+        save_button.configure(command=save_guided)
+
+        if first_run:
+            tk.Button(
+                footer,
+                text="SOLO LOCALE PER ORA",
+                command=local_only,
+                bg=PANEL3,
+                fg=TEXT,
+                activebackground=BORDER,
+                activeforeground=TEXT,
+                relief="flat",
+                bd=0,
+                cursor="hand2",
+                padx=16,
+                pady=10,
+            ).pack(side="left")
+        else:
+            tk.Button(
+                footer,
+                text="ANNULLA",
+                command=win.destroy,
+                bg=PANEL3,
+                fg=TEXT,
+                activebackground=BORDER,
+                activeforeground=TEXT,
+                relief="flat",
+                bd=0,
+                cursor="hand2",
+                padx=16,
+                pady=10,
+            ).pack(side="left")
+
+        win.protocol("WM_DELETE_WINDOW", local_only if first_run else win.destroy)
+        if self.github_user and self.remote:
+            account_status.configure(text=f"GitHub configurato: {self.github_user}", fg=GREEN)
+
+    # ========================================================
     # SETTINGS
     # ========================================================
 
@@ -2229,6 +2521,22 @@ class SchoolHub:
             bg=PANEL,
         )
         self.settings_dirty_label.pack(anchor="w", pady=(3,0))
+        tk.Button(
+            github_head,
+            text="CONFIGURAZIONE GUIDATA",
+            command=lambda: self.show_github_setup(first_run=False),
+            bg=PANEL3,
+            fg=TEXT,
+            activebackground=BLUE,
+            activeforeground="white",
+            relief="flat",
+            bd=0,
+            font=("Segoe UI", 9, "bold"),
+            cursor="hand2",
+            padx=16,
+            pady=10,
+        ).pack(side="right", padx=(8,0))
+
         tk.Button(
             github_head,
             text="✓  SALVA",
