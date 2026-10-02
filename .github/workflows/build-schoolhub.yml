@@ -35,13 +35,14 @@ jobs:
           if ($actual -ne "11a25bb9e4b54868a2754b15d3c665b5384fb24cc06946a3fb0f29af6f135ba8") { throw "Source hash mismatch" }
           tar -xf "source.tar.xz"
 
-      - name: Apply SchoolHub 2.5.0 Installer + GitHub Onboarding + Devices source
+      - name: Apply SchoolHub 2.6.0 Maintenance + Support Release source
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           Copy-Item ".schoolhub-source-audit\src\schoolhub_gui.py" ".\src\schoolhub_gui.py" -Force
           Copy-Item ".schoolhub-source-audit\src\workspace.py" ".\src\workspace.py" -Force
           Copy-Item ".schoolhub-source-audit\SchoolHub.spec" ".\SchoolHub.spec" -Force
+          Copy-Item ".schoolhub-source-audit\version_info.txt" ".\version_info.txt" -Force
           Copy-Item ".schoolhub-source-audit\requirements.txt" ".\requirements.txt" -Force
           if (Test-Path ".schoolhub-source-audit\tests") {
             Copy-Item ".schoolhub-source-audit\tests\*" ".\tests\" -Recurse -Force
@@ -72,8 +73,8 @@ jobs:
           spec_path = root / 'SchoolHub.spec'
 
           gui = gui_path.read_text(encoding='utf-8')
-          if 'APP_VERSION = "2.5.0"' not in gui:
-              raise SystemExit('APP_VERSION 2.5.0 marker not found')
+          if 'APP_VERSION = "2.6.0"' not in gui:
+              raise SystemExit('APP_VERSION 2.6.0 marker not found')
 
           lines = gui.splitlines()
           matches = [i for i, line in enumerate(lines) if line.strip() == 'root.mainloop()']
@@ -94,7 +95,7 @@ jobs:
           ]
           lines[i:i+1] = block
           gui_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-          (root / 'VERSION.txt').write_text('2.5.0\n', encoding='utf-8')
+          (root / 'VERSION.txt').write_text('2.6.0\n', encoding='utf-8')
 
           logo = Image.open(root / 'schoolhub_icon.png').convert('RGBA')
           canvas = Image.new('RGBA', (680, 410), (8, 17, 32, 255))
@@ -126,7 +127,7 @@ jobs:
           subtitle = 'UltraLight · ambiente sicuro'
           box = draw.textbbox((0, 0), subtitle, font=sub_font)
           draw.text(((680-(box[2]-box[0]))/2, 276), subtitle, fill=(161, 188, 220, 255), font=sub_font)
-          draw.text((34, 374), 'SchoolHub 2.5.0 - Avvio applicazione', fill=(119, 151, 188, 255), font=small_font)
+          draw.text((34, 374), 'SchoolHub 2.6.0 - Avvio applicazione', fill=(119, 151, 188, 255), font=small_font)
           canvas.convert('RGB').save(root / 'schoolhub_splash.png', 'PNG')
 
           spec = spec_path.read_text(encoding='utf-8')
@@ -211,7 +212,7 @@ jobs:
               'safe default remote': 'DEFAULT_REMOTE = ""' in gui,
               'auto sync default off': '"auto_sync": False' in gui,
               'auto start default off': '"auto_start": False' in gui,
-              'version 2.5.0': 'APP_VERSION = "2.5.0"' in gui,
+              'version 2.6.0': 'APP_VERSION = "2.6.0"' in gui,
               'daily update cache': 'UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60' in gui,
               'minute clock': 'after(60000, self.update_clock)' in gui,
               'single instance': 'def _acquire_single_instance()' in gui,
@@ -349,7 +350,7 @@ jobs:
           if (-not $result.checks.lfs_locks_disabled) { throw "Git LFS locksverify disable test failed" }
           if (-not $result.checks.github_browser_login_command) { throw "GCM GitHub browser login command test failed" }
           if (-not $result.checks.safe_default_remote) { throw "Privacy remote failed" }
-          if ($result.checks.version -ne "2.5.0") { throw "Wrong version" }
+          if ($result.checks.version -ne "2.6.0") { throw "Wrong version" }
 
       - name: GUI idle smoke test
         shell: pwsh
@@ -410,7 +411,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SchoolHub-Windows-v2.5.0
+          name: SchoolHub-Windows-v2.6.0-Maintenance
           path: |
             dist/SchoolHub.exe
             dist/SchoolHub.exe.sha256.txt
@@ -426,11 +427,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "schoolhub-v2.5.0"
-          $notes = "SchoolHub 2.5.0 Installer + GitHub Onboarding + Devices: aggiunge SchoolHub-Setup.exe con installazione Windows guidata per utente, onboarding al primo avvio con login GitHub tramite GCM e selezione repository/branch dall account, configurazione guidata richiamabile dalle Impostazioni e pannello Dispositivi basato sul branch separato schoolhub-status. I token restano in Git Credential Manager e non vengono salvati nei file SchoolHub. Mantiene Vault, updater, Git LFS e compatibilita 2.4.x."
+          $tag = "schoolhub-v2.6.0"
+          $notes = "SchoolHub 2.6.0 Maintenance + Support Release: aggiunge SchoolHub-Setup.exe con installazione Windows guidata per utente, onboarding al primo avvio con login GitHub tramite GCM e selezione repository/branch dall account, configurazione guidata richiamabile dalle Impostazioni e pannello Dispositivi basato sul branch separato schoolhub-status. I token restano in Git Credential Manager e non vengono salvati nei file SchoolHub. Mantiene Vault, updater, Git LFS e compatibilita 2.4.x."
           if (gh release view $tag --repo "$env:GITHUB_REPOSITORY" *> $null) {
             gh release upload $tag ".\dist\SchoolHub.exe#SchoolHub.exe" ".\dist\SchoolHub.exe.sha256.txt#SchoolHub.exe.sha256.txt" ".\dist\SchoolHub-Setup.exe#SchoolHub-Setup.exe" ".\dist\SchoolHub-Setup.exe.sha256.txt#SchoolHub-Setup.exe.sha256.txt" --clobber --repo "$env:GITHUB_REPOSITORY"
-            gh release edit $tag --title "SchoolHub 2.5.0 Installer + GitHub Onboarding + Devices" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
+            gh release edit $tag --title "SchoolHub 2.6.0 Maintenance + Support Release" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
           } else {
-            gh release create $tag ".\dist\SchoolHub.exe#SchoolHub.exe" ".\dist\SchoolHub.exe.sha256.txt#SchoolHub.exe.sha256.txt" ".\dist\SchoolHub-Setup.exe#SchoolHub-Setup.exe" ".\dist\SchoolHub-Setup.exe.sha256.txt#SchoolHub-Setup.exe.sha256.txt" --target "$env:GITHUB_SHA" --title "SchoolHub 2.5.0 Installer + GitHub Onboarding + Devices" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
+            gh release create $tag ".\dist\SchoolHub.exe#SchoolHub.exe" ".\dist\SchoolHub.exe.sha256.txt#SchoolHub.exe.sha256.txt" ".\dist\SchoolHub-Setup.exe#SchoolHub-Setup.exe" ".\dist\SchoolHub-Setup.exe.sha256.txt#SchoolHub-Setup.exe.sha256.txt" --target "$env:GITHUB_SHA" --title "SchoolHub 2.6.0 Maintenance + Support Release" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
           }
