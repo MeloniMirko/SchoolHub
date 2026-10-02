@@ -431,6 +431,16 @@ class SchoolHub:
             # Primo controllo poco dopo l'avvio, poi intervallo configurato.
             self.root.after(2000, self.auto_sync)
 
+        if self.git_enabled:
+            self.root.after(
+                8000,
+                lambda: threading.Thread(
+                    target=self._publish_device_status_quiet,
+                    args=("unknown", 0, 0),
+                    daemon=True,
+                ).start(),
+            )
+
         self.root.protocol(
             "WM_DELETE_WINDOW",
             self.close
@@ -2513,6 +2523,24 @@ class SchoolHub:
         finally:
             shutil.rmtree(temp_root, ignore_errors=True)
 
+    @staticmethod
+    def _device_presence(record):
+        value = str(record.get("last_seen_utc") or "")
+        try:
+            seen = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if seen.tzinfo is None:
+                seen = seen.replace(tzinfo=timezone.utc)
+            age = max(0, int((datetime.now(timezone.utc) - seen.astimezone(timezone.utc)).total_seconds()))
+            if age <= 10 * 60:
+                return "ONLINE", age
+            if age < 3600:
+                return f"{age // 60} min fa", age
+            if age < 86400:
+                return f"{age // 3600} h fa", age
+            return f"{age // 86400} gg fa", age
+        except Exception:
+            return "ultimo contatto sconosciuto", None
+
     def _effective_device_state(self, record, current_head):
         state = str(record.get("state") or "unknown")
         record_head = str(record.get("data_head") or "")
@@ -2600,10 +2628,23 @@ class SchoolHub:
                 if record.get("device_id") == self.device_id:
                     title += "  ·  QUESTO PC"
                 tk.Label(left, text=title, font=("Segoe UI",10,"bold"), fg=TEXT, bg=row["bg"]).pack(anchor="w")
-                detail = f"Ultimo contatto: {record.get('last_seen_utc','-')}   ·   SchoolHub {record.get('app_version','?')}"
-                tk.Label(left, text=detail, font=("Segoe UI",8), fg=MUTED, bg=row["bg"]).pack(anchor="w", pady=(3,0))
+                presence, _age = self._device_presence(record)
+                record_version = str(record.get("app_version") or "?")
+                outdated = version_tuple(record_version) < version_tuple(APP_VERSION)
+                detail = f"{presence}   ·   SchoolHub {record_version}"
+                tk.Label(
+                    left,
+                    text=detail,
+                    font=("Segoe UI",8,"bold" if presence == "ONLINE" else "normal"),
+                    fg=GREEN if presence == "ONLINE" else MUTED,
+                    bg=row["bg"],
+                ).pack(anchor="w", pady=(3,0))
+                right = tk.Frame(row, bg=row["bg"])
+                right.pack(side="right", padx=18, pady=10)
+                if outdated:
+                    tk.Label(right, text="AGGIORNAMENTO RICHIESTO", font=("Segoe UI",8,"bold"), fg=RED, bg=row["bg"]).pack(anchor="e", pady=(0,3))
                 color = GREEN if state == "updated" else (RED if state == "conflict" else YELLOW)
-                tk.Label(row, text=self._device_state_name(state), font=("Segoe UI",9,"bold"), fg=color, bg=row["bg"]).pack(side="right", padx=18)
+                tk.Label(right, text=self._device_state_name(state), font=("Segoe UI",9,"bold"), fg=color, bg=row["bg"]).pack(anchor="e")
 
         def worker():
             try:
