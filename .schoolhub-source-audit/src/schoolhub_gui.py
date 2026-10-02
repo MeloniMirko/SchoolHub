@@ -28,12 +28,13 @@ CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 LOG_FILE = os.path.join(APP_DIR, "schoolhub.log")
 SYNC_STATE_FILE = os.path.join(APP_DIR, "sync_state.json")
 
-APP_VERSION = "2.4.8"
-RELEASE_API = "https://api.github.com/repos/MeloniMirko/Scuola/releases/latest"
-UPDATE_USER_AGENT = "SchoolHub-Updater/2.4.8"
+APP_VERSION = "2.4.9"
+RELEASE_API = "https://api.github.com/repos/MeloniMirko/SchoolHub/releases/latest"
+UPDATE_USER_AGENT = "SchoolHub-Updater/2.4.9"
 UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 UPDATE_STAMP_FILE = os.path.join(APP_DIR, "last_update_check.txt")
 GIT_TIMEOUT_SECONDS = 180
+LFS_MEDIA_PATTERNS = ("*.mp3", "*.mp4", "*.m4a", "*.wav", "*.flac", "*.aac", "*.ogg", "*.mov", "*.mkv", "*.avi", "*.webm")
 
 DEFAULT_REPO = os.path.join(APP_DIR, "TempGit")
 DEFAULT_REMOTE = ""
@@ -59,24 +60,39 @@ def bundled_git_info():
         if os.path.isfile(git_exe):
             vendor_root = os.path.dirname(root)
             gcm_root = os.path.join(vendor_root, "gcm")
+            lfs_root = os.path.join(vendor_root, "lfs")
             gcm_exe = os.path.join(gcm_root, "git-credential-manager.exe")
+            lfs_exe = os.path.join(lfs_root, "git-lfs.exe")
             path_parts = [
                 os.path.join(root, "cmd"),
                 os.path.join(root, "mingw64", "bin"),
                 os.path.join(root, "usr", "bin"),
             ]
+            git_config = []
             if os.path.isfile(gcm_exe):
                 path_parts.append(gcm_root)
-                # GCM can open the GitHub browser/device authentication even
-                # though SchoolHub launches git without a console window.
                 env["GCM_INTERACTIVE"] = "always"
                 env["GCM_GUI_PROMPT"] = "1"
                 env["GIT_TERMINAL_PROMPT"] = "0"
-                env["GIT_CONFIG_COUNT"] = "2"
-                env["GIT_CONFIG_KEY_0"] = "credential.helper"
-                env["GIT_CONFIG_VALUE_0"] = "manager"
-                env["GIT_CONFIG_KEY_1"] = "credential.https://github.com.useHttpPath"
-                env["GIT_CONFIG_VALUE_1"] = "true"
+                git_config.extend([
+                    ("credential.helper", "manager"),
+                    ("credential.https://github.com.useHttpPath", "true"),
+                ])
+            if os.path.isfile(lfs_exe):
+                path_parts.append(lfs_root)
+                # Configure LFS in-process so clone/add/push work without a
+                # machine-wide Git installation or modifying the user's .gitconfig.
+                git_config.extend([
+                    ("filter.lfs.process", "git-lfs filter-process"),
+                    ("filter.lfs.smudge", "git-lfs smudge -- %f"),
+                    ("filter.lfs.clean", "git-lfs clean -- %f"),
+                    ("filter.lfs.required", "true"),
+                ])
+            if git_config:
+                env["GIT_CONFIG_COUNT"] = str(len(git_config))
+                for idx, (key, value) in enumerate(git_config):
+                    env[f"GIT_CONFIG_KEY_{idx}"] = key
+                    env[f"GIT_CONFIG_VALUE_{idx}"] = value
             env["PATH"] = os.pathsep.join(path_parts + [env.get("PATH", "")])
             env["GIT_EXEC_PATH"] = os.path.join(root, "mingw64", "libexec", "git-core")
             return git_exe, env, True
@@ -2568,6 +2584,8 @@ class SchoolHub:
                 if os.path.islink(path):
                     raise WorkspaceError(f"Collegamento simbolico non supportato nella sincronizzazione: {os.path.relpath(path, root)}")
                 rel = os.path.relpath(path, root).replace("\\", "/")
+                if rel == ".gitattributes":
+                    continue
                 h = hashlib.sha256()
                 with open(path, "rb") as fh:
                     while True:
@@ -2590,6 +2608,9 @@ class SchoolHub:
             os.makedirs(target_dir, exist_ok=True)
             for name in files:
                 source_file = os.path.join(current, name)
+                rel_file = os.path.relpath(source_file, src).replace("\\", "/")
+                if rel_file == ".gitattributes":
+                    continue
                 if os.path.islink(source_file):
                     raise WorkspaceError(f"Collegamento simbolico non supportato: {source_file}")
                 shutil.copy2(source_file, os.path.join(target_dir, name))
@@ -2696,6 +2717,22 @@ class SchoolHub:
             user = (self.github_user or "schoolhub").replace(" ", "-")
             self.git(["config", "user.email", f"{user}@users.noreply.github.com"], cwd=repo)
 
+    def _prepare_git_lfs(self, repo):
+        """Enable Git LFS locally and track common audio/video formats."""
+        code, out, err = self.git(["lfs", "version"], cwd=repo)
+        if code != 0:
+            raise WorkspaceError(
+                "Git LFS integrato non disponibile: impossibile sincronizzare in sicurezza MP3/MP4 e altri media grandi. "
+                + (err or out or "")
+            )
+        code, out, err = self.git(["lfs", "install", "--local"], cwd=repo)
+        if code != 0:
+            raise WorkspaceError(err or out or "Impossibile inizializzare Git LFS.")
+        code, out, err = self.git(["lfs", "track", *LFS_MEDIA_PATTERNS], cwd=repo)
+        if code != 0:
+            raise WorkspaceError(err or out or "Impossibile configurare Git LFS per i file multimediali.")
+        self.write_log("✓ Git LFS attivo per MP3/MP4 e altri media audio/video.")
+
     @staticmethod
     def _remove_path(path):
         if os.path.islink(path) or os.path.isfile(path):
@@ -2740,16 +2777,20 @@ class SchoolHub:
                 pass
 
     def _persist_sync_tree(self, source, password, temp_root):
-        """Persist a final merged tree to the encrypted Vault and verify byte identity."""
-        expected = self._hash_tree(source)
+        """Persist only user files; Git metadata such as .gitattributes stays in the temp repo."""
+        user_tree = os.path.join(temp_root, "merged-user-tree")
+        if os.path.exists(user_tree):
+            shutil.rmtree(user_tree, ignore_errors=True)
+        self._copy_tree(source, user_tree)
+        expected = self._hash_tree(user_tree)
         if self.workspace.is_unlocked:
-            self.workspace.replace_plaintext_from_tree(source)
-            self.workspace.save_unlocked_to_vault(source)
+            self.workspace.replace_plaintext_from_tree(user_tree)
+            self.workspace.save_unlocked_to_vault(user_tree)
             actual = self._hash_tree(self.workspace.get_unlocked_path())
         else:
             if not password:
                 raise WorkspaceError("Password Workspace necessaria per applicare la sincronizzazione.")
-            self.workspace.import_from(source, password)
+            self.workspace.import_from(user_tree, password)
             verify_dir = os.path.join(temp_root, "verify-vault")
             if os.path.exists(verify_dir): shutil.rmtree(verify_dir, ignore_errors=True)
             self.workspace.export_to(verify_dir, password)
@@ -2891,15 +2932,16 @@ class SchoolHub:
             self._persist_sync_tree(repo, password, temp_root)
 
             if local_only:
-                self.progress_update(78, "Commit", "Preparazione modifiche Git")
+                self.progress_update(78, "Commit", "Preparazione modifiche Git + LFS media")
                 self._ensure_git_identity(repo)
+                self._prepare_git_lfs(repo)
                 code, _, err = self.git(["add", "-A"], cwd=repo)
                 if code != 0: raise WorkspaceError(err or "git add fallito.")
                 message = "SchoolHub initial sync" if state is None else "SchoolHub automatic sync"
                 code, out, err = self.git(["commit", "-m", message], cwd=repo)
                 if code != 0 and "nothing to commit" not in (out + " " + err).lower():
                     raise WorkspaceError(err or out or "git commit fallito.")
-                self.progress_update(86, "Upload GitHub", "Invio modifiche al repository privato")
+                self.progress_update(86, "Upload GitHub", "Invio modifiche e media LFS al repository")
                 code, out, err = self.git(["push", "-u", "origin", self.branch], cwd=repo)
                 if code != 0: raise WorkspaceError(err or out or "git push fallito.")
                 self.progress_update(93, "Verifica remota", "Controllo commit pubblicato")
@@ -3503,6 +3545,41 @@ def _frozen_self_test(output_path):
         if cp_gcm.returncode != 0:
             raise RuntimeError(cp_gcm.stderr or cp_gcm.stdout or "Git Credential Manager non disponibile")
         result["checks"]["git_credential_manager"] = cp_gcm.stdout.strip() or cp_gcm.stderr.strip() or True
+
+        cp_lfs = subprocess.run(
+            [git_exe, "lfs", "version"], cwd=temp_root,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            env=git_env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+        )
+        if cp_lfs.returncode != 0:
+            raise RuntimeError(cp_lfs.stderr or cp_lfs.stdout or "Git LFS non disponibile")
+        result["checks"]["git_lfs"] = cp_lfs.stdout.strip() or cp_lfs.stderr.strip() or True
+
+        # Functional LFS test: both MP3 and MP4 must enter the index as LFS objects.
+        lfs_repo = os.path.join(temp_root, "lfs-repo")
+        os.makedirs(lfs_repo, exist_ok=True)
+        def run_lfs_git(args):
+            cp = subprocess.run(
+                [git_exe] + args, cwd=lfs_repo, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", env=git_env,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+            )
+            if cp.returncode != 0:
+                raise RuntimeError(cp.stderr or cp.stdout or "Git LFS self-test fallito")
+            return cp.stdout.strip()
+        run_lfs_git(["init"])
+        run_lfs_git(["lfs", "install", "--local"])
+        run_lfs_git(["lfs", "track", "*.mp3", "*.mp4"])
+        with open(os.path.join(lfs_repo, "audio.mp3"), "wb") as fh:
+            fh.write(b"ID3" + os.urandom(1024 * 1024))
+        with open(os.path.join(lfs_repo, "video.mp4"), "wb") as fh:
+            fh.write(b"\x00\x00\x00\x18ftypmp42" + os.urandom(1024 * 1024))
+        run_lfs_git(["add", ".gitattributes", "audio.mp3", "video.mp4"])
+        listed = run_lfs_git(["lfs", "ls-files"])
+        if "audio.mp3" not in listed or "video.mp4" not in listed:
+            raise RuntimeError("MP3/MP4 non vengono gestiti da Git LFS")
+        result["checks"]["media_git_lfs"] = True
 
         ws = os.path.join(temp_root, "Workspaces", "Scuola")
         vault = os.path.join(temp_root, "Vaults", "Scuola.vault")
