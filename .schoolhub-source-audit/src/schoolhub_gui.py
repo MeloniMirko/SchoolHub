@@ -3599,16 +3599,23 @@ def _frozen_self_test(output_path):
 
         long_rel = os.path.join(
             "PCTO", "Corso Smart Learning", "Video Smart Learning",
-            "ElevenLabs_2026-05-12T13_32_03_Manuela - Warm, Energetic and Swift_"
-            + ("pvc_sp95_s27_sb100_se58_b_m2_" * 4) + ".mp3",
+            "ElevenLabs_2026-05-12T13_32_03_Manuela - Warm, Energetic and Swift_pvc_sp95_s27_sb100_se58_b_m2.mp3",
         )
         long_plain = wm._io_path(os.path.join(ws, long_rel))
         long_plain.parent.mkdir(parents=True, exist_ok=True)
         with long_plain.open("wb") as fh:
             fh.write(b"ID3" + (b"LongPathSchoolHub" * 20000))
-        simulated_long_vault = os.path.join(vault + ".syncvault-1234567890abcdef", "files", long_rel)
-        if len(os.path.abspath(simulated_long_vault)) <= 260:
-            raise RuntimeError("Long-path self-test non supera MAX_PATH")
+        # Match the real bug: source path is still usable, but adding the
+        # syncvault staging suffix + old temp suffix would exceed MAX_PATH.
+        source_len = len(os.path.abspath(os.path.join(ws, long_rel)))
+        simulated_old_tmp = os.path.join(
+            vault + ".syncvault-1234567890abcdef", "files",
+            long_rel + ".tmp-1234567890abcdef",
+        )
+        if source_len >= 260:
+            raise RuntimeError(f"Long-path self-test sorgente troppo lungo ({source_len})")
+        if len(os.path.abspath(simulated_old_tmp)) <= 260:
+            raise RuntimeError("Long-path self-test non riproduce il vecchio tmp oltre MAX_PATH")
 
         password = "SchoolHub-SelfTest-Only-42!"
         wm.create(password)
@@ -3645,6 +3652,12 @@ def _frozen_self_test(output_path):
         long_restored = wm._io_path(os.path.join(ws, long_rel))
         if not long_restored.is_file() or long_restored.stat().st_size < 100000:
             raise RuntimeError("Round-trip percorso lungo MP3 non valido")
+        # This is the operation that failed in the user's log: unlocked sync
+        # encrypting into Scuola.vault.syncvault-... with a long MP3 path.
+        wm.save_unlocked_to_vault(ws)
+        long_enc = wm._io_path(os.path.join(vault, "files", long_rel))
+        if not long_enc.is_file():
+            raise RuntimeError("Salvataggio syncvault percorso lungo MP3 non valido")
         result["checks"]["windows_long_media_path"] = True
 
         wm.session_lock()
