@@ -333,6 +333,10 @@ jobs:
           $mb = [math]::Round($size / 1MB, 1)
           Write-Host "SchoolHub.exe size: $mb MB"
           if ($size -gt 160MB) { throw "UltraLight size budget exceeded: $mb MB" }
+          $vi = (Get-Item ".\dist\SchoolHub.exe").VersionInfo
+          Write-Host "EXE ProductVersion: $($vi.ProductVersion) Company: $($vi.CompanyName)"
+          if ($vi.ProductVersion -notlike "2.6.0*") { throw "EXE ProductVersion metadata missing" }
+          if ($vi.CompanyName -ne "SchoolHub") { throw "EXE CompanyName metadata missing" }
 
       - name: Self-test EXE
         shell: pwsh
@@ -358,6 +362,9 @@ jobs:
           if (-not $result.checks.editor_safe_incremental_sync) { throw "Editor-safe incremental sync test failed" }
           if (-not $result.checks.lfs_locks_disabled) { throw "Git LFS locksverify disable test failed" }
           if (-not $result.checks.github_browser_login_command) { throw "GCM GitHub browser login command test failed" }
+          if (-not $result.checks.update_channel_default) { throw "Stable update channel default failed" }
+          if (-not $result.checks.support_error_codes) { throw "Support error codes failed" }
+          if (-not $result.checks.diagnostic_redaction) { throw "Diagnostic redaction failed" }
           if (-not $result.checks.safe_default_remote) { throw "Privacy remote failed" }
           if ($result.checks.version -ne "2.6.0") { throw "Wrong version" }
 
@@ -406,6 +413,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup compile failed" }
           if (!(Test-Path ".\dist\SchoolHub-Setup.exe")) { throw "SchoolHub-Setup.exe missing" }
           Write-Host "Installer size: $([math]::Round((Get-Item '.\dist\SchoolHub-Setup.exe').Length / 1MB, 1)) MB"
+          $setupVi = (Get-Item ".\dist\SchoolHub-Setup.exe").VersionInfo
+          Write-Host "Setup ProductVersion: $($setupVi.ProductVersion) Company: $($setupVi.CompanyName)"
+          if ($setupVi.ProductVersion -notlike "2.6.0*") { throw "Setup ProductVersion metadata missing" }
+          if ($setupVi.CompanyName -ne "SchoolHub") { throw "Setup CompanyName metadata missing" }
 
       - name: Checksum
         shell: pwsh
