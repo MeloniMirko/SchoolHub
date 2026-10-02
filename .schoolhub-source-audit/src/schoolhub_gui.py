@@ -28,9 +28,9 @@ CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 LOG_FILE = os.path.join(APP_DIR, "schoolhub.log")
 SYNC_STATE_FILE = os.path.join(APP_DIR, "sync_state.json")
 
-APP_VERSION = "2.4.10"
+APP_VERSION = "2.4.11"
 RELEASE_API = "https://api.github.com/repos/MeloniMirko/SchoolHub/releases/latest"
-UPDATE_USER_AGENT = "SchoolHub-Updater/2.4.10"
+UPDATE_USER_AGENT = "SchoolHub-Updater/2.4.11"
 UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 UPDATE_STAMP_FILE = os.path.join(APP_DIR, "last_update_check.txt")
 GIT_TIMEOUT_SECONDS = 180
@@ -1931,9 +1931,7 @@ class SchoolHub:
             code, out, err = self.git(["commit", "-m", "SchoolHub: risoluzione conflitti"], cwd=repo)
             if code != 0 and "nothing to commit" not in (out + " " + err).lower():
                 raise WorkspaceError(err or out or "git commit fallito.")
-            code, out, err = self.git(["push", "-u", "origin", self.branch], cwd=repo)
-            if code != 0:
-                raise WorkspaceError(err or out or "git push fallito.")
+            self._push_with_auth_retry(repo)
             self._verify_remote_head(repo)
 
             final_files = self._hash_tree(repo)
@@ -2733,10 +2731,75 @@ class SchoolHub:
         code, out, err = self.git(["lfs", "install", "--local"], cwd=repo)
         if code != 0:
             raise WorkspaceError(err or out or "Impossibile inizializzare Git LFS.")
+        # SchoolHub does not use Git LFS file locking. The lock verification API
+        # requires authenticated push access and can block an otherwise valid push.
+        code, out, err = self.git(["config", "lfs.locksverify", "false"], cwd=repo)
+        if code != 0:
+            raise WorkspaceError(err or out or "Impossibile disattivare la verifica lock Git LFS.")
         code, out, err = self.git(["lfs", "track", *LFS_MEDIA_PATTERNS], cwd=repo)
         if code != 0:
             raise WorkspaceError(err or out or "Impossibile configurare Git LFS per i file multimediali.")
-        self.write_log("✓ Git LFS attivo per MP3/MP4 e altri media audio/video.")
+        self.write_log("✓ Git LFS attivo per MP3/MP4; verifica lock disattivata (SchoolHub non usa i lock).")
+
+    @staticmethod
+    def _looks_like_github_auth_error(text):
+        value = (text or "").lower()
+        markers = (
+            "authentication required",
+            "authentication failed",
+            "could not read username",
+            "repository not found",
+            "permission to",
+            "denied to",
+            "write access",
+            "push access",
+            "verify locks",
+            "http 401",
+            "http 403",
+            "status code 401",
+            "status code 403",
+        )
+        return any(marker in value for marker in markers)
+
+    def _github_browser_login(self, repo):
+        """Force a fresh GitHub.com OAuth login using bundled GCM."""
+        args = [
+            "credential-manager", "github", "login",
+            "--url", "https://github.com",
+            "--web",
+            "--force",
+        ]
+        self.write_log("🔐 GitHub richiede autenticazione: apro il login nel browser...")
+        code, out, err = self.git(args, cwd=repo, timeout=300)
+        if code != 0:
+            raise WorkspaceError(
+                "Accesso GitHub non completato. Accedi nel browser con un account che abbia permesso di scrittura sul repository. "
+                + (err or out or "")
+            )
+        self.write_log("✓ Accesso GitHub completato. Riprovo il push.")
+
+    def _push_with_auth_retry(self, repo):
+        """Push once, authenticate via GCM on auth failures, then retry exactly once."""
+        args = ["push", "-u", "origin", self.branch]
+        code, out, err = self.git(args, cwd=repo)
+        if code == 0:
+            return out
+
+        detail = "\n".join(x for x in (out, err) if x).strip()
+        if self._looks_like_github_auth_error(detail):
+            self._github_browser_login(repo)
+            code, out, err = self.git(args, cwd=repo)
+            if code == 0:
+                return out
+            detail = "\n".join(x for x in (out, err) if x).strip()
+            if self._looks_like_github_auth_error(detail):
+                raise WorkspaceError(
+                    "GitHub ha rifiutato il push anche dopo il login. "
+                    "L'account autenticato deve avere permesso WRITE/PUSH sul repository configurato. "
+                    + detail
+                )
+
+        raise WorkspaceError(detail or "git push fallito.")
 
     @staticmethod
     def _remove_path(path):
@@ -2949,8 +3012,7 @@ class SchoolHub:
                 if code != 0 and "nothing to commit" not in (out + " " + err).lower():
                     raise WorkspaceError(err or out or "git commit fallito.")
                 self.progress_update(86, "Upload GitHub", "Invio modifiche e media LFS al repository")
-                code, out, err = self.git(["push", "-u", "origin", self.branch], cwd=repo)
-                if code != 0: raise WorkspaceError(err or out or "git push fallito.")
+                self._push_with_auth_retry(repo)
                 self.progress_update(93, "Verifica remota", "Controllo commit pubblicato")
                 self._verify_remote_head(repo)
 
@@ -3553,6 +3615,16 @@ def _frozen_self_test(output_path):
             raise RuntimeError(cp_gcm.stderr or cp_gcm.stdout or "Git Credential Manager non disponibile")
         result["checks"]["git_credential_manager"] = cp_gcm.stdout.strip() or cp_gcm.stderr.strip() or True
 
+        cp_login_help = subprocess.run(
+            [git_exe, "credential-manager", "github", "login", "--help"], cwd=temp_root,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            env=git_env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+        )
+        if cp_login_help.returncode != 0 or "--force" not in (cp_login_help.stdout + cp_login_help.stderr):
+            raise RuntimeError("Comando login GitHub GCM non disponibile")
+        result["checks"]["github_browser_login_command"] = True
+
         cp_lfs = subprocess.run(
             [git_exe, "lfs", "version"], cwd=temp_root,
             capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -3577,6 +3649,10 @@ def _frozen_self_test(output_path):
             return cp.stdout.strip()
         run_lfs_git(["init"])
         run_lfs_git(["lfs", "install", "--local"])
+        run_lfs_git(["config", "lfs.locksverify", "false"])
+        if run_lfs_git(["config", "--get", "lfs.locksverify"]).strip().lower() != "false":
+            raise RuntimeError("Git LFS locksverify non disattivato")
+        result["checks"]["lfs_locks_disabled"] = True
         run_lfs_git(["lfs", "track", "*.mp3", "*.mp4"])
         with open(os.path.join(lfs_repo, "audio.mp3"), "wb") as fh:
             fh.write(b"ID3" + os.urandom(1024 * 1024))
