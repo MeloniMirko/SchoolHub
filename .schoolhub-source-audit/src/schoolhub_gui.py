@@ -1983,7 +1983,8 @@ class SchoolHub:
                 self.close_progress()
                 if self.running: self.root.after(0, lambda: self.navigate("Workspace"))
             except Exception as e:
-                self.write_log(f"✕ Blocco Workspace fallito: {e}")
+                code = self._error_code("workspace", e)
+                self.write_log(f"✕ [{code}] Blocco Workspace fallito: {e}")
                 self.close_progress()
                 if self.running:
                     self.root.after(0, lambda text=str(e): messagebox.showerror("Workspace", text, parent=self.root))
@@ -2120,8 +2121,9 @@ class SchoolHub:
                 self.write_log(f"✓ Conflitti risolti: mantenuto GitHub per {len(conflicts)} file.")
                 self.finish_status("SINCRONIZZATO", GREEN, "Conflitti risolti: mantenuto GitHub")
         except Exception as e:
-            self.write_log(f"✕ Risoluzione conflitti fallita: {e}")
-            self.finish_status("ERRORE", RED, str(e))
+            code = self._error_code("sync", e)
+            self.write_log(f"✕ [{code}] Risoluzione conflitti fallita: {e}")
+            self.finish_status("ERRORE", RED, f"[{code}] {e}")
         finally:
             shutil.rmtree(temp_root, ignore_errors=True)
             self.sync_running = False
@@ -2529,7 +2531,8 @@ class SchoolHub:
             head = data_head if data_head is not None else self._current_remote_data_head()
             self._publish_device_record(self._build_device_record(state, local_pending, remote_pending, head))
         except Exception as exc:
-            self.write_log(f"⚠ Stato dispositivo non pubblicato: {exc}")
+            code = self._error_code("sync", exc)
+            self.write_log(f"⚠ [{code}] Stato dispositivo non pubblicato: {exc}")
 
     def show_devices(self):
         self.clear_content()
@@ -3916,10 +3919,11 @@ class SchoolHub:
             self.finish_status("SINCRONIZZATO", GREEN, "Sincronizzazione completata")
             time.sleep(0.25)
         except Exception as e:
-            self.write_log(f"✕ ERRORE SYNC: {e}")
-            self.progress_update(100, "Errore", str(e))
-            if self.last_conflicts: self.finish_status("CONFLITTO", RED, str(e))
-            else: self.finish_status("ERRORE", RED, str(e))
+            code = self._error_code("sync", e)
+            self.write_log(f"✕ [{code}] ERRORE SYNC: {e}")
+            self.progress_update(100, "Errore", f"[{code}] {e}")
+            if self.last_conflicts: self.finish_status("CONFLITTO", RED, f"[{code}] {e}")
+            else: self.finish_status("ERRORE", RED, f"[{code}] {e}")
             time.sleep(0.6)
         finally:
             shutil.rmtree(temp_root, ignore_errors=True)
