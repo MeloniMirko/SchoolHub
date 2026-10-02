@@ -209,9 +209,14 @@ def resource_path(name):
 
 
 def version_tuple(value):
-    import re
-    nums = re.findall(r"\d+", str(value))
-    return tuple(int(x) for x in (nums[:3] + ["0", "0", "0"])[:3])
+    text = str(value or "")
+    nums = re.findall(r"\d+", text)
+    base = tuple(int(x) for x in (nums[:3] + ["0", "0", "0"])[:3])
+    lower = text.lower()
+    prerelease = any(mark in lower for mark in ("alpha", "beta", "-rc", ".rc", "preview", "pre"))
+    stage = 0 if prerelease else 1
+    extra = int(nums[3]) if prerelease and len(nums) > 3 else 0
+    return base + (stage, extra)
 
 
 class PasswordDialog:
