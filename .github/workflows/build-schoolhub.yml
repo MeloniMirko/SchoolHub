@@ -319,10 +319,14 @@ jobs:
         run: |
           $out = Join-Path $PWD "dist\selftest.json"
           $p = Start-Process ".\dist\SchoolHub.exe" -ArgumentList @("--self-test", $out) -PassThru -Wait
-          if ($p.ExitCode -ne 0) { throw "Self-test process failed: $($p.ExitCode)" }
-          $result = Get-Content $out -Raw | ConvertFrom-Json
-          $result | ConvertTo-Json -Depth 8
-          if (-not $result.ok) { throw "Self-test reported failure" }
+          if (Test-Path $out) {
+            $result = Get-Content $out -Raw | ConvertFrom-Json
+            $result | ConvertTo-Json -Depth 8
+          } else {
+            throw "Self-test did not create selftest.json (exit $($p.ExitCode))"
+          }
+          if ($p.ExitCode -ne 0) { throw "Self-test process failed: $($p.ExitCode) - $($result.error)" }
+          if (-not $result.ok) { throw "Self-test reported failure: $($result.error)" }
           if (-not $result.checks.vault_roundtrip) { throw "Vault failed" }
           if (-not $result.checks.media_streaming) { throw "Media streaming failed" }
           if (-not $result.checks.legacy_stream_unlock) { throw "Legacy SHENC1 streaming unlock failed" }
