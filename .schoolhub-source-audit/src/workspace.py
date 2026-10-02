@@ -495,12 +495,50 @@ class WorkspaceManager:
             magic = fh.read(len(self.FILE_MAGIC))
         aad_base = self.FILE_AAD_PREFIX + str(rel).replace("\\", "/").encode("utf-8")
         if magic == self.FILE_MAGIC_V1:
-            payload = source.read_bytes()
-            if len(payload) < len(self.FILE_MAGIC_V1) + self.NONCE_LEN + 16:
+            # Authenticate legacy SHENC1 in streaming mode as well.  The old
+            # implementation used read_bytes()+AESGCM.decrypt(), which loaded
+            # the entire MP3/MP4 into RAM during Vault verification.
+            try:
+                total = source.stat().st_size
+            except OSError as exc:
+                raise WorkspaceError(f"Impossibile leggere il file cifrato {rel}: {exc}") from exc
+            header_len = len(self.FILE_MAGIC_V1) + self.NONCE_LEN
+            cipher_len = total - header_len - 16
+            if cipher_len < 0:
                 raise WorkspaceError(f"File cifrato non valido: {rel}")
-            off = len(self.FILE_MAGIC_V1)
-            _aesgcm()(key).decrypt(payload[off:off+self.NONCE_LEN], payload[off+self.NONCE_LEN:], aad_base)
-            return
+            try:
+                from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+                with source.open("rb") as src:
+                    if src.read(len(self.FILE_MAGIC_V1)) != self.FILE_MAGIC_V1:
+                        raise WorkspaceError(f"Formato file non riconosciuto: {rel}")
+                    nonce = src.read(self.NONCE_LEN)
+                    if len(nonce) != self.NONCE_LEN:
+                        raise WorkspaceError(f"File cifrato troncato: {rel}")
+                    src.seek(total - 16)
+                    tag = src.read(16)
+                    if len(tag) != 16:
+                        raise WorkspaceError(f"File cifrato troncato: {rel}")
+                    src.seek(header_len)
+                    decryptor = Cipher(algorithms.AES(key), modes.GCM(nonce, tag)).decryptor()
+                    decryptor.authenticate_additional_data(aad_base)
+                    remaining = cipher_len
+                    while remaining:
+                        chunk = src.read(min(self.STREAM_CHUNK_SIZE, remaining))
+                        if not chunk:
+                            raise WorkspaceError(f"File cifrato troncato: {rel}")
+                        decryptor.update(chunk)
+                        remaining -= len(chunk)
+                    try:
+                        decryptor.finalize()
+                    except Exception as exc:
+                        raise WorkspaceError(
+                            f"Verifica cifratura fallita per {rel}: file danneggiato o chiave non valida."
+                        ) from exc
+                return
+            except WorkspaceError:
+                raise
+            except OSError as exc:
+                raise WorkspaceError(f"Impossibile verificare {rel}: {exc}") from exc
         if magic != self.FILE_MAGIC:
             raise WorkspaceError(f"Formato file non riconosciuto: {rel}")
         with source.open("rb") as src:
