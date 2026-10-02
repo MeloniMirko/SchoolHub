@@ -416,7 +416,7 @@ jobs:
           $setupVi = (Get-Item ".\dist\SchoolHub-Setup.exe").VersionInfo
           Write-Host "Setup ProductVersion: $($setupVi.ProductVersion) Company: $($setupVi.CompanyName)"
           if ($setupVi.ProductVersion -notlike "2.6.0*") { throw "Setup ProductVersion metadata missing" }
-          if ($setupVi.CompanyName -ne "SchoolHub") { throw "Setup CompanyName metadata missing" }
+          if ($setupVi.CompanyName.Trim() -ne "SchoolHub") { throw "Setup CompanyName metadata missing" }
 
       - name: Checksum
         shell: pwsh
