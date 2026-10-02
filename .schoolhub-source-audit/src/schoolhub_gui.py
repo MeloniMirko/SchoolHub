@@ -4255,6 +4255,270 @@ class SchoolHub:
             self.write_log(f"✕ Avvio automatico Windows non applicato: {exc}")
             return False
 
+    @staticmethod
+    def _error_code(context, exc):
+        text = str(exc or "").lower()
+        if context == "update":
+            return "SH-UPD-401"
+        if "authentication" in text or "push access" in text or "permission" in text:
+            return "SH-GIT-101"
+        if "branch" in text:
+            return "SH-GIT-102"
+        if "git lfs" in text or "lfs" in text:
+            return "SH-GIT-103"
+        if "push" in text:
+            return "SH-GIT-104"
+        if "conflitt" in text:
+            return "SH-SYNC-301"
+        if "in uso" in text or "being used" in text or "winerror 32" in text:
+            return "SH-SYNC-302"
+        if "cifr" in text or "vault" in text or "shenc" in text:
+            return "SH-VLT-201"
+        if "path" in text or "percorso" in text or "filename" in text:
+            return "SH-VLT-202"
+        if context == "diagnostic":
+            return "SH-DIAG-601"
+        if context == "repair":
+            return "SH-REP-701"
+        return "SH-SYNC-399"
+
+    def _redact_diagnostic_text(self, value):
+        text = str(value or "")
+        replacements = []
+        home = os.path.expanduser("~")
+        userprofile = os.environ.get("USERPROFILE", "")
+        for item in {home, userprofile, self.workspace_path, self.vault_path, APP_DIR}:
+            if item:
+                replacements.append(item)
+        for item in sorted(replacements, key=len, reverse=True):
+            text = re.sub(re.escape(item), "<REDACTED_PATH>", text, flags=re.IGNORECASE)
+        text = re.sub(r"github_pat_[A-Za-z0-9_]{20,}", "<REDACTED_TOKEN>", text)
+        text = re.sub(r"gh[pousr]_[A-Za-z0-9]{20,}", "<REDACTED_TOKEN>", text)
+        text = re.sub(r"(?i)(authorization\s*[:=]\s*(?:bearer|basic)\s+)[^\s]+", r"\1<REDACTED>", text)
+        text = re.sub(r"(?i)(password|passwd|token|secret)\s*[:=]\s*[^\s,;]+", r"\1=<REDACTED>", text)
+        text = re.sub(r"https://[^\s/@:]+:[^\s/@]+@github\.com/[^\s]+", "https://github.com/<REDACTED>", text)
+        text = re.sub(r"https://github\.com/[^/\s]+/[^\s]+", "https://github.com/<REDACTED>/<REDACTED>", text)
+        text = re.sub(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", "<REDACTED_EMAIL>", text)
+        return text
+
+    def _runtime_health(self):
+        checks = {}
+        try:
+            code, out, err = self.git(["--version"], cwd=APP_DIR, timeout=20)
+            checks["git"] = {"ok": code == 0, "detail": (out or err).strip()[:300]}
+        except Exception as exc:
+            checks["git"] = {"ok": False, "detail": str(exc)}
+        try:
+            code, out, err = self.git(["credential-manager", "--version"], cwd=APP_DIR, timeout=20)
+            checks["gcm"] = {"ok": code == 0, "detail": (out or err).strip()[:300]}
+        except Exception as exc:
+            checks["gcm"] = {"ok": False, "detail": str(exc)}
+        try:
+            code, out, err = self.git(["lfs", "version"], cwd=APP_DIR, timeout=20)
+            checks["lfs"] = {"ok": code == 0, "detail": (out or err).strip()[:300]}
+        except Exception as exc:
+            checks["lfs"] = {"ok": False, "detail": str(exc)}
+        return checks
+
+    def export_diagnostics(self):
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        destination = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Esporta diagnostica SchoolHub",
+            defaultextension=".zip",
+            initialfile=f"SchoolHub-Diagnostica-{stamp}.zip",
+            filetypes=[("Archivio ZIP", "*.zip")],
+        )
+        if not destination:
+            return
+
+        def worker():
+            temp_root = tempfile.mkdtemp(prefix="schoolhub-diagnostic-")
+            try:
+                runtime = self._runtime_health()
+                summary = {
+                    "schema": 1,
+                    "created_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                    "schoolhub_version": APP_VERSION,
+                    "update_channel": self.update_channel,
+                    "windows": {
+                        "system": platform.system(),
+                        "release": platform.release(),
+                        "version": platform.version(),
+                        "machine": platform.machine(),
+                    },
+                    "frozen_build": bool(getattr(sys, "frozen", False)),
+                    "config": {
+                        "auto_sync": bool(self.auto_sync_enabled),
+                        "auto_start": bool(self.auto_start_enabled),
+                        "interval_seconds": int(self.interval),
+                        "remote_configured": bool(self.remote),
+                        "branch": self.branch,
+                        "workspace_exists": bool(self.workspace.exists),
+                        "workspace_unlocked": bool(self.workspace.is_unlocked),
+                        "vault_metadata_present": os.path.isfile(os.path.join(self.vault_path, "vault.json")),
+                        "sync_state_present": os.path.isfile(self.sync_state_file),
+                    },
+                    "runtime": runtime,
+                }
+
+                summary_path = os.path.join(temp_root, "diagnostic-summary.json")
+                with open(summary_path, "w", encoding="utf-8") as fh:
+                    json.dump(summary, fh, indent=2, ensure_ascii=False)
+
+                log_path = os.path.join(temp_root, "schoolhub-sanitized.log")
+                if os.path.isfile(LOG_FILE):
+                    with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as src:
+                        lines = src.readlines()[-500:]
+                    with open(log_path, "w", encoding="utf-8") as dst:
+                        for line in lines:
+                            dst.write(self._redact_diagnostic_text(line))
+                else:
+                    with open(log_path, "w", encoding="utf-8") as dst:
+                        dst.write("Nessun log disponibile.\n")
+
+                readme = os.path.join(temp_root, "README.txt")
+                with open(readme, "w", encoding="utf-8") as fh:
+                    fh.write(
+                        "SchoolHub Diagnostica\n"
+                        "Questo archivio non include password, token GitHub, contenuto del Vault o file scolastici.\n"
+                        "I percorsi utente, email e URL repository vengono redatti automaticamente.\n"
+                    )
+
+                with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    zf.write(summary_path, "diagnostic-summary.json")
+                    zf.write(log_path, "schoolhub-sanitized.log")
+                    zf.write(readme, "README.txt")
+                self.write_log("✓ Diagnostica esportata con dati sensibili redatti.")
+                if self.running:
+                    self.root.after(
+                        0,
+                        lambda: messagebox.showinfo(
+                            "Diagnostica",
+                            "Archivio diagnostico creato correttamente.\n\n"
+                            "Non contiene password, token GitHub, Vault o file scolastici.",
+                            parent=self.root,
+                        ),
+                    )
+            except Exception as exc:
+                code = self._error_code("diagnostic", exc)
+                self.write_log(f"✕ [{code}] Esportazione diagnostica fallita: {exc}")
+                if self.running:
+                    self.root.after(0, lambda text=str(exc), c=code: messagebox.showerror("Diagnostica", f"[{c}] {text}", parent=self.root))
+            finally:
+                shutil.rmtree(temp_root, ignore_errors=True)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def repair_schoolhub(self):
+        if self.sync_running or self.workspace_busy:
+            messagebox.showinfo("Ripara SchoolHub", "Attendi il termine dell'operazione in corso.", parent=self.root)
+            return
+        if not messagebox.askyesno(
+            "Ripara SchoolHub",
+            "Eseguire una riparazione sicura?\n\n"
+            "Verranno controllati configurazione, cartelle, avvio Windows, Git, GCM, LFS e file temporanei.\n"
+            "Vault e file scolastici NON verranno eliminati o ricreati.",
+            parent=self.root,
+        ):
+            return
+
+        def worker():
+            report = []
+            ok = True
+            try:
+                for path in [
+                    APP_DIR,
+                    os.path.dirname(self.workspace_path),
+                    os.path.dirname(self.vault_path),
+                    os.path.dirname(self.sync_state_file),
+                    os.path.join(APP_DIR, "Updates"),
+                    os.path.join(APP_DIR, "Backups"),
+                ]:
+                    os.makedirs(path, exist_ok=True)
+                report.append("✓ Cartelle SchoolHub verificate")
+
+                snapshot = dict(self.config)
+                save_config(snapshot)
+                verified = load_config()
+                if not isinstance(verified, dict):
+                    raise RuntimeError("config.json non rileggibile")
+                report.append("✓ config.json scritto e riletto")
+
+                startup_ok = self.set_windows_startup(bool(self.auto_start_enabled))
+                if self.auto_start_enabled and not startup_ok:
+                    ok = False
+                    report.append("✕ Avvio automatico Windows non verificato")
+                else:
+                    report.append("✓ Avvio automatico Windows verificato")
+
+                runtime = self._runtime_health()
+                for key, label in (("git", "Git"), ("gcm", "Git Credential Manager"), ("lfs", "Git LFS")):
+                    item = runtime.get(key, {})
+                    if item.get("ok"):
+                        report.append(f"✓ {label}: {item.get('detail','OK')}")
+                    else:
+                        ok = False
+                        report.append(f"✕ {label}: {item.get('detail','errore')}")
+
+                if self.workspace.exists:
+                    meta = os.path.join(self.vault_path, "vault.json")
+                    files_dir = os.path.join(self.vault_path, "files")
+                    if os.path.isfile(meta) and os.path.isdir(files_dir):
+                        report.append("✓ Struttura Vault presente")
+                    else:
+                        ok = False
+                        report.append("✕ Struttura Vault incompleta — nessuna modifica eseguita")
+                else:
+                    report.append("• Vault non ancora creato")
+
+                if os.path.isfile(self.sync_state_file):
+                    try:
+                        with open(self.sync_state_file, "r", encoding="utf-8") as fh:
+                            state = json.load(fh)
+                        if not isinstance(state, dict) or not isinstance(state.get("files"), dict):
+                            raise ValueError("formato non valido")
+                        report.append("✓ Stato sync leggibile")
+                    except Exception:
+                        ok = False
+                        report.append("✕ Stato sync non leggibile — lasciato intatto per sicurezza")
+
+                update_dir = os.path.join(APP_DIR, "Updates")
+                removed = 0
+                for name in ("SchoolHub-Setup.new.exe", "SchoolHub.new.exe"):
+                    path = os.path.join(update_dir, name)
+                    if os.path.isfile(path):
+                        try:
+                            os.unlink(path)
+                            removed += 1
+                        except OSError:
+                            pass
+                report.append(f"✓ File update temporanei puliti: {removed}")
+
+                if self.remote:
+                    code, out, err = self.git(["ls-remote", self._git_remote_for_auth(), f"refs/heads/{self.branch}"], cwd=APP_DIR, timeout=60)
+                    if code == 0:
+                        report.append("✓ Repository/branch GitHub raggiungibile")
+                    else:
+                        ok = False
+                        report.append("✕ Repository/branch GitHub non raggiungibile: " + self._redact_diagnostic_text(err or out))
+
+                title = "Riparazione completata" if ok else "Riparazione completata con avvisi"
+                self.write_log("✓ Riparazione SchoolHub eseguita." if ok else "⚠ Riparazione SchoolHub completata con avvisi.")
+                if self.running:
+                    body = "\n".join(report)
+                    self.root.after(
+                        0,
+                        lambda t=title, b=body: messagebox.showinfo(t, b[:3500], parent=self.root),
+                    )
+            except Exception as exc:
+                code = self._error_code("repair", exc)
+                self.write_log(f"✕ [{code}] Riparazione fallita: {exc}")
+                if self.running:
+                    self.root.after(0, lambda text=str(exc), c=code: messagebox.showerror("Ripara SchoolHub", f"[{c}] {text}", parent=self.root))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def write_log(self, text):
 
         timestamp = datetime.now().strftime(
