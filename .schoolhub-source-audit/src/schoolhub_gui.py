@@ -4999,14 +4999,15 @@ def _frozen_self_test(output_path):
         probe = object.__new__(SchoolHub)
         probe.workspace_path = r"C:\\Users\\Mario Rossi\\SchoolHub\\Scuola"
         probe.vault_path = r"C:\\Users\\Mario Rossi\\SchoolHub\\Vaults\\Scuola.vault"
+        fake_token = "gh" + "p_" + ("A" * 30)
         sample = (
             r"C:\\Users\\Mario Rossi\\SchoolHub\\Scuola\\segreto.txt "
             "mario.rossi@example.com "
             "https://github.com/MarioRossi/Scuola.git "
-            "token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
+            "token=" + fake_token
         )
         redacted = SchoolHub._redact_diagnostic_text(probe, sample)
-        if "Mario Rossi" in redacted or "mario.rossi@example.com" in redacted or "MarioRossi/Scuola" in redacted or "ghp_" in redacted:
+        if "Mario Rossi" in redacted or "mario.rossi@example.com" in redacted or "MarioRossi/Scuola" in redacted or fake_token in redacted:
             raise RuntimeError("Redazione diagnostica dati sensibili non valida")
         result["checks"]["diagnostic_redaction"] = True
 
