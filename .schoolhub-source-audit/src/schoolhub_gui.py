@@ -2939,9 +2939,25 @@ class SchoolHub:
 
         update_card = tk.Frame(top, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
         update_card.pack(side="left", fill="both", expand=True, padx=(8,0))
-        tk.Label(update_card, text="AGGIORNAMENTI", font=("Segoe UI",9,"bold"), fg=MUTED, bg=PANEL).pack(anchor="w", padx=20, pady=(17,4))
-        tk.Label(update_card, text="Controllo automatico all'avvio", font=("Segoe UI",10,"bold"), fg=GREEN, bg=PANEL).pack(anchor="w", padx=20)
-        tk.Button(update_card, text="CONTROLLA AGGIORNAMENTI", command=lambda: self.check_for_updates(silent=False), bg=PANEL3, fg=TEXT, activebackground=BLUE, activeforeground="white", relief="flat", bd=0, font=("Segoe UI",9,"bold"), cursor="hand2", padx=14, pady=9).pack(anchor="w", padx=20, pady=(10,15))
+        tk.Label(update_card, text="AGGIORNAMENTI E SUPPORTO", font=("Segoe UI",9,"bold"), fg=MUTED, bg=PANEL).pack(anchor="w", padx=20, pady=(14,4))
+        channel_row = tk.Frame(update_card, bg=PANEL)
+        channel_row.pack(fill="x", padx=20)
+        tk.Label(channel_row, text="Canale", font=("Segoe UI",9,"bold"), fg=TEXT, bg=PANEL).pack(side="left")
+        self.update_channel_var = tk.StringVar(value=self.update_channel)
+        channel_box = ttk.Combobox(
+            channel_row,
+            textvariable=self.update_channel_var,
+            values=["stable", "beta"],
+            state="readonly",
+            width=10,
+            font=("Segoe UI",9),
+        )
+        channel_box.pack(side="left", padx=(10,0))
+        actions = tk.Frame(update_card, bg=PANEL)
+        actions.pack(fill="x", padx=20, pady=(10,14))
+        tk.Button(actions, text="AGGIORNAMENTI", command=lambda: self.check_for_updates(silent=False), bg=PANEL3, fg=TEXT, activebackground=BLUE, activeforeground="white", relief="flat", bd=0, font=("Segoe UI",8,"bold"), cursor="hand2", padx=10, pady=8).pack(side="left")
+        tk.Button(actions, text="DIAGNOSTICA", command=self.export_diagnostics, bg=PANEL3, fg=TEXT, activebackground=BLUE, activeforeground="white", relief="flat", bd=0, font=("Segoe UI",8,"bold"), cursor="hand2", padx=10, pady=8).pack(side="left", padx=(7,0))
+        tk.Button(actions, text="RIPARA", command=self.repair_schoolhub, bg=PANEL3, fg=TEXT, activebackground=BLUE, activeforeground="white", relief="flat", bd=0, font=("Segoe UI",8,"bold"), cursor="hand2", padx=10, pady=8).pack(side="left", padx=(7,0))
 
         card = tk.Frame(self.content, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
         card.pack(fill="x", pady=(8, 10))
@@ -3038,6 +3054,7 @@ class SchoolHub:
         self.interval_entry.bind("<KeyRelease>", mark_settings_dirty)
         self.auto_var.trace_add("write", mark_settings_dirty)
         self.start_var.trace_add("write", mark_settings_dirty)
+        self.update_channel_var.trace_add("write", mark_settings_dirty)
         self.root.bind("<Control-s>", lambda _event: self.save_settings())
         self.root.bind("<Control-S>", lambda _event: self.save_settings())
 
@@ -3077,7 +3094,8 @@ class SchoolHub:
                 f"Repository: {verified.get('remote') or 'nessuno'}\n"
                 f"Branch: {verified.get('branch') or DEFAULT_BRANCH}\n"
                 f"Sync automatica: {'ATTIVA' if verified.get('auto_sync') else 'DISATTIVA'}\n"
-                f"Avvio Windows: {'ATTIVO' if verified.get('auto_start') else 'DISATTIVO'}"
+                f"Avvio Windows: {'ATTIVO' if verified.get('auto_start') else 'DISATTIVO'}\n"
+                f"Canale aggiornamenti: {str(verified.get('update_channel','stable')).upper()}"
             ),
             font=("Segoe UI", 9),
             fg=MUTED,
@@ -3141,6 +3159,7 @@ class SchoolHub:
         new_github_user = m.group(1) if m else ""
         requested_auto_sync = bool(self.auto_var.get()) and bool(new_remote)
         requested_auto_start = bool(self.start_var.get())
+        requested_update_channel = "beta" if str(self.update_channel_var.get()).lower() == "beta" else "stable"
         new_interval = interval_minutes * 60
 
         # First persist the exact UI state.
@@ -3152,6 +3171,7 @@ class SchoolHub:
             "github_user": new_github_user,
             "auto_sync": requested_auto_sync,
             "auto_start": requested_auto_start,
+            "update_channel": requested_update_channel,
             "interval": new_interval,
             "workspace_path": self.workspace_path,
             "vault_path": self.vault_path,
@@ -3201,6 +3221,7 @@ class SchoolHub:
             "github_user": new_github_user,
             "auto_sync": requested_auto_sync,
             "auto_start": actual_auto_start,
+            "update_channel": requested_update_channel,
             "interval": new_interval,
         }
         mismatches = {
@@ -3226,6 +3247,7 @@ class SchoolHub:
         self.interval = int(verified["interval"])
         self.auto_sync_enabled = bool(verified["auto_sync"])
         self.auto_start_enabled = bool(verified["auto_start"])
+        self.update_channel = "beta" if str(verified.get("update_channel") or "stable").lower() == "beta" else "stable"
         self.git_enabled = bool(self.remote)
         self.schedule_auto_sync()
 
