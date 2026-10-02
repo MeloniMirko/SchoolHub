@@ -13,6 +13,9 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import uuid
+import zipfile
+import platform
+import re
 from datetime import datetime, timezone
 
 from workspace import WorkspaceManager, WorkspaceError
@@ -29,9 +32,10 @@ CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 LOG_FILE = os.path.join(APP_DIR, "schoolhub.log")
 SYNC_STATE_FILE = os.path.join(APP_DIR, "sync_state.json")
 
-APP_VERSION = "2.5.0"
+APP_VERSION = "2.6.0"
 RELEASE_API = "https://api.github.com/repos/MeloniMirko/SchoolHub/releases/latest"
-UPDATE_USER_AGENT = "SchoolHub-Updater/2.5.0"
+RELEASES_API = "https://api.github.com/repos/MeloniMirko/SchoolHub/releases?per_page=30"
+UPDATE_USER_AGENT = "SchoolHub-Updater/2.6.0"
 UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 UPDATE_STAMP_FILE = os.path.join(APP_DIR, "last_update_check.txt")
 GIT_TIMEOUT_SECONDS = 180
@@ -146,6 +150,7 @@ def default_config():
         "onboarding_complete": False,
         "device_id": "",
         "device_name": "",
+        "update_channel": "stable",
     }
 
 def load_config():
@@ -560,6 +565,7 @@ class SchoolHub:
             "onboarding_complete": bool(old.get("onboarding_complete", bool(remote))),
             "device_id": str(old.get("device_id") or uuid.uuid4().hex),
             "device_name": str(old.get("device_name") or ""),
+            "update_channel": "beta" if str(old.get("update_channel") or "stable").lower() == "beta" else "stable",
         }
         if not self.config["device_name"]:
             self.config["device_name"] = "Dispositivo " + self.config["device_id"][:6].upper()
@@ -576,6 +582,7 @@ class SchoolHub:
         self.onboarding_complete = bool(self.config.get("onboarding_complete", False))
         self.device_id = str(self.config.get("device_id") or uuid.uuid4().hex)
         self.device_name = str(self.config.get("device_name") or ("Dispositivo " + self.device_id[:6].upper()))
+        self.update_channel = "beta" if str(self.config.get("update_channel") or "stable").lower() == "beta" else "stable"
         self.workspace = WorkspaceManager(self.workspace_path, self.vault_path)
 
     def ask_password(self, title, subtitle, confirm=False, min_length=1):
