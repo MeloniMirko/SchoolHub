@@ -383,17 +383,10 @@ jobs:
           $p.Refresh()
           if ($p.HasExited) { throw "GUI exited at startup: $($p.ExitCode)" }
 
-          Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public static class SchoolHubWindowTest {
-    [DllImport("user32.dll", SetLastError=true)]
-    public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
-}
-"@
+          Add-Type -Namespace SchoolHubSmoke -Name Native -MemberDefinition '[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError=true)] public static extern bool MoveWindow(System.IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);'
           $p.Refresh()
           if ($p.MainWindowHandle -ne [IntPtr]::Zero) {
-            [SchoolHubWindowTest]::MoveWindow($p.MainWindowHandle, 50, 50, 760, 540, $true) | Out-Null
+            [SchoolHubSmoke.Native]::MoveWindow($p.MainWindowHandle, 50, 50, 760, 540, $true) | Out-Null
             Start-Sleep -Seconds 3
             $p.Refresh()
             if ($p.HasExited) { throw "GUI exited after compact resize: $($p.ExitCode)" }
