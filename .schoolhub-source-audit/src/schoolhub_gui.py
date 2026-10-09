@@ -32,10 +32,10 @@ CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 LOG_FILE = os.path.join(APP_DIR, "schoolhub.log")
 SYNC_STATE_FILE = os.path.join(APP_DIR, "sync_state.json")
 
-APP_VERSION = "2.6.1"
+APP_VERSION = "2.6.2"
 RELEASE_API = "https://api.github.com/repos/MeloniMirko/SchoolHub/releases/latest"
 RELEASES_API = "https://api.github.com/repos/MeloniMirko/SchoolHub/releases?per_page=30"
-UPDATE_USER_AGENT = "SchoolHub-Updater/2.6.1"
+UPDATE_USER_AGENT = "SchoolHub-Updater/2.6.2"
 UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 UPDATE_STAMP_FILE = os.path.join(APP_DIR, "last_update_check.txt")
 GIT_TIMEOUT_SECONDS = 180
@@ -48,6 +48,16 @@ DEFAULT_BRANCH = "master"
 DEFAULT_INTERVAL = 300
 
 DEFAULT_WORKSPACE = os.path.join(APP_DIR, "Workspaces", "Scuola")
+
+
+def independent_process_environment():
+    """A restarted frozen app must not reuse the retiring app's extraction dir."""
+    env = os.environ.copy()
+    for key in list(env):
+        if key.startswith('_PYI_') or key in ('_MEIPASS2', 'PYINSTALLER_SUPPRESS_SPLASH_SCREEN'):
+            env.pop(key, None)
+    env['PYINSTALLER_RESET_ENVIRONMENT'] = '1'
+    return env
 
 
 def bundled_git_info():
@@ -81,8 +91,9 @@ def bundled_git_info():
                 env["GCM_GUI_PROMPT"] = "1"
                 env["GIT_TERMINAL_PROMPT"] = "0"
                 git_config.extend([
+                    ("credential.helper", ""),
                     ("credential.helper", "manager"),
-                    ("credential.https://github.com.useHttpPath", "true"),
+                    ("credential.https://github.com.useHttpPath", "false"),
                 ])
             if os.path.isfile(lfs_exe):
                 path_parts.append(lfs_root)
@@ -898,6 +909,8 @@ class SchoolHub:
                 subprocess.Popen(
                     ["cmd.exe", "/c", batch],
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    env=independent_process_environment(),
+                    cwd=update_dir,
                 )
                 self.root.after(0, self._close_for_update)
             except Exception as exc:
@@ -3510,16 +3523,18 @@ class SchoolHub:
         if code == 0:
             return code, out, err
 
-        if "push" in args and ("403" in err or "Permission to" in err or "denied to" in err):
-            try:
-                u = urllib.parse.urlparse(self.remote)
-                if u.scheme in ("http", "https") and u.hostname == "github.com":
-                    cred = f"protocol={u.scheme}\nhost={u.hostname}\npath={u.path.lstrip('/')}\n\n"
-                    run_git(["credential", "reject"], input_text=cred)
-                    self.write_log("↻ Credenziale GitHub rifiutata: nuovo accesso richiesto per questo repository.")
-                    return run_git(args)
-            except Exception:
-                pass
+        # Read operations need the same recovery as push (private repos and LFS).
+        if args and args[0] in ("ls-remote", "fetch", "clone") and self._github_repo_parts():
+            detail = "\n".join((out, err))
+            if self._looks_like_github_auth_error(detail):
+                self._github_browser_login(cwd)
+                retry_args = list(args)
+                for i, value in enumerate(retry_args):
+                    if isinstance(value, str) and value.startswith("https://") and "github.com" in value:
+                        retry_args[i] = self._git_remote_for_auth()
+                if os.path.isdir(os.path.join(cwd, ".git")):
+                    run_git(["remote", "set-url", "origin", self._git_remote_for_auth()])
+                return run_git(retry_args)
         return code, out, err
 
     def _github_host_credential(self):
@@ -3660,7 +3675,7 @@ class SchoolHub:
             with urllib.request.urlopen(req, timeout=12) as response:
                 data = json.loads(response.read().decode("utf-8"))
             if data.get("private") is False:
-                self.write_log("⚠ Repository GitHub pubblico: sincronizzazione consentita su richiesta dell'utente.")
+                self.write_log("✓ Repository GitHub pubblico consentito. Per caricare modifiche serve un account con accesso in scrittura.")
                 return
             if data.get("private") is True:
                 return
@@ -3757,18 +3772,14 @@ class SchoolHub:
         os.replace(tmp, self.sync_state_file)
 
     def _git_remote_for_auth(self):
-        """Prefer the GitHub repository owner as the HTTPS username so each Windows user
-        gets an isolated Credential Manager entry and GitHub can select the right account."""
+        """Use only an explicitly selected account, never infer one from repo ownership."""
         if not self.remote:
             return self.remote
         import urllib.parse, re
         try:
             u = urllib.parse.urlparse(self.remote)
             if u.scheme in ("http", "https") and u.hostname == "github.com":
-                user = self.github_user
-                if not user:
-                    m = re.match(r"/([^/]+)/", u.path or "")
-                    user = m.group(1) if m else ""
+                user = getattr(self, "github_user", "")
                 if user:
                     return urllib.parse.urlunparse((u.scheme, f"{urllib.parse.quote(user)}@github.com", u.path, u.params, u.query, u.fragment))
         except Exception:
@@ -3931,10 +3942,20 @@ class SchoolHub:
         code, out, err = self.git(args, cwd=repo, timeout=300)
         if code != 0:
             raise WorkspaceError(
-                "Accesso GitHub non completato. Accedi nel browser con un account che abbia permesso di scrittura sul repository. "
+                "Authentication failed: accesso GitHub non completato. Accedi nel browser con un account che abbia permesso di scrittura sul repository. "
                 + (err or out or "")
             )
-        self.write_log("✓ Accesso GitHub completato. Riprovo il push.")
+        # Resolve the real OAuth identity, not the repository owner or a stale hint.
+        _, token = self._github_host_credential()
+        try:
+            account = self._github_api_json("https://api.github.com/user", token)
+            username = account.get("login", "")
+            if not username:
+                raise WorkspaceError("Authentication failed: GitHub non ha restituito l'account autenticato.")
+            self.github_user = username
+        finally:
+            token = None
+        self.write_log(f"✓ Accesso GitHub completato come {self.github_user}. Riprovo l'operazione.")
 
     def _push_with_auth_retry(self, repo, branch_name=None):
         """Push once, authenticate via GCM on auth failures, then retry exactly once."""
@@ -3947,14 +3968,20 @@ class SchoolHub:
         detail = "\n".join(x for x in (out, err) if x).strip()
         if self._looks_like_github_auth_error(detail):
             self._github_browser_login(repo)
+            config_code, config_out, config_err = self.git(
+                ["remote", "set-url", "origin", self._git_remote_for_auth()], cwd=repo)
+            if config_code != 0:
+                raise WorkspaceError(config_err or config_out or "Impossibile aggiornare l'account del repository temporaneo.")
             code, out, err = self.git(args, cwd=repo)
             if code == 0:
                 return out
             detail = "\n".join(x for x in (out, err) if x).strip()
             if self._looks_like_github_auth_error(detail):
                 raise WorkspaceError(
-                    "GitHub ha rifiutato il push anche dopo il login. "
-                    "L'account autenticato deve avere permesso WRITE/PUSH sul repository configurato. "
+                    "Authentication failed: GitHub ha rifiutato il caricamento anche dopo il nuovo login. "
+                    f"Account: {self.github_user}. Repository: {self.remote}. "
+                    "Un repository pubblico consente la lettura a tutti, ma solo proprietario e collaboratori possono caricare modifiche. "
+                    "Accedi con l'account corretto oppure chiedi al proprietario l'accesso in scrittura. "
                     + detail
                 )
 
@@ -4545,7 +4572,7 @@ class SchoolHub:
         text = str(exc or "").lower()
         if context == "update":
             return "SH-UPD-401"
-        if "authentication" in text or "push access" in text or "permission" in text:
+        if SchoolHub._looks_like_github_auth_error(text):
             return "SH-GIT-101"
         if "branch" in text:
             return "SH-GIT-102"
@@ -5326,6 +5353,22 @@ def _acquire_single_instance():
 
 
 def main():
+    # Integration probe: child must survive removal of the parent's onefile runtime.
+    if len(sys.argv) >= 3 and sys.argv[1] == "--restart-smoke":
+        subprocess.Popen([sys.executable, "--restart-smoke-child", sys.argv[2]],
+                         env=independent_process_environment())
+        return
+    if len(sys.argv) >= 3 and sys.argv[1] == "--restart-smoke-child":
+        time.sleep(4)
+        probe = tk.Tk()
+        probe.withdraw()
+        probe.update_idletasks()
+        runtime = getattr(sys, "_MEIPASS", "")
+        result = {"ok": bool(runtime and os.path.isdir(runtime)), "runtime": runtime}
+        with open(sys.argv[2], "w", encoding="utf-8") as fh:
+            json.dump(result, fh)
+        probe.destroy()
+        return
     if len(sys.argv) >= 3 and sys.argv[1] == "--self-test":
         raise SystemExit(_frozen_self_test(sys.argv[2]))
 
@@ -5340,7 +5383,18 @@ def main():
     root = None
     try:
         root = tk.Tk()
+        root.withdraw()
         SchoolHub(root)
+        # Build and lay out the entire UI before mapping its first frame.
+        root.update_idletasks()
+        root.deiconify()
+        root.update_idletasks()
+        try:
+            import pyi_splash
+            if pyi_splash.is_alive():
+                pyi_splash.close()
+        except ImportError:
+            pass
         root.mainloop()
     except Exception as exc:
         try:

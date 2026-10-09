@@ -35,7 +35,7 @@ jobs:
           if ($actual -ne "11a25bb9e4b54868a2754b15d3c665b5384fb24cc06946a3fb0f29af6f135ba8") { throw "Source hash mismatch" }
           tar -xf "source.tar.xz"
 
-      - name: Apply SchoolHub 2.6.1 Branch + Responsive Fix source
+      - name: Apply SchoolHub 2.6.2 Update Restart + Animated Intro source
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -44,6 +44,7 @@ jobs:
           Copy-Item ".schoolhub-source-audit\SchoolHub.spec" ".\SchoolHub.spec" -Force
           Copy-Item ".schoolhub-source-audit\version_info.txt" ".\version_info.txt" -Force
           Copy-Item ".schoolhub-source-audit\requirements.txt" ".\requirements.txt" -Force
+          Copy-Item ".schoolhub-source-audit\intro.tcl" ".\intro.tcl" -Force
           if (Test-Path ".schoolhub-source-audit\tests") {
             Copy-Item ".schoolhub-source-audit\tests\*" ".\tests\" -Recurse -Force
           }
@@ -61,7 +62,7 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install Pillow
 
-      - name: Prepare 2.4 splash
+      - name: Prepare animated boot intro
         shell: pwsh
         run: |
           @'
@@ -73,36 +74,17 @@ jobs:
           spec_path = root / 'SchoolHub.spec'
 
           gui = gui_path.read_text(encoding='utf-8')
-          if 'APP_VERSION = "2.6.1"' not in gui:
-              raise SystemExit('APP_VERSION 2.6.1 marker not found')
+          if 'APP_VERSION = "2.6.2"' not in gui:
+              raise SystemExit('APP_VERSION 2.6.2 marker not found')
 
-          lines = gui.splitlines()
-          matches = [i for i, line in enumerate(lines) if line.strip() == 'root.mainloop()']
-          if len(matches) != 1:
-              raise SystemExit(f'Expected one root.mainloop(), got {len(matches)}')
-          i = matches[0]
-          indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
-          block = [
-              indent + 'try:',
-              indent + '    import pyi_splash',
-              indent + '    if pyi_splash.is_alive():',
-              indent + '        pyi_splash.update_text("SchoolHub pronto")',
-              indent + '        pyi_splash.close()',
-              indent + 'except Exception:',
-              indent + '    pass',
-              '',
-              indent + 'root.mainloop()',
-          ]
-          lines[i:i+1] = block
-          gui_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-          (root / 'VERSION.txt').write_text('2.6.1\n', encoding='utf-8')
+          (root / 'VERSION.txt').write_text('2.6.2\n', encoding='utf-8')
 
           logo = Image.open(root / 'schoolhub_icon.png').convert('RGBA')
           canvas = Image.new('RGBA', (680, 410), (8, 17, 32, 255))
           draw = ImageDraw.Draw(canvas)
           draw.rounded_rectangle((8, 8, 671, 401), radius=34, fill=(10, 24, 44, 255), outline=(35, 124, 255, 255), width=2)
           draw.rounded_rectangle((34, 326, 646, 358), radius=16, fill=(17, 39, 67, 255), outline=(43, 103, 177, 255), width=1)
-          draw.rounded_rectangle((36, 328, 286, 356), radius=14, fill=(20, 121, 255, 255))
+
           logo.thumbnail((185, 185), Image.Resampling.LANCZOS)
           canvas.alpha_composite(logo, ((680-logo.width)//2, 38))
 
@@ -127,7 +109,7 @@ jobs:
           subtitle = 'UltraLight · ambiente sicuro'
           box = draw.textbbox((0, 0), subtitle, font=sub_font)
           draw.text(((680-(box[2]-box[0]))/2, 276), subtitle, fill=(161, 188, 220, 255), font=sub_font)
-          draw.text((34, 374), 'SchoolHub 2.6.1 - Avvio applicazione', fill=(119, 151, 188, 255), font=small_font)
+          draw.text((34, 374), 'SchoolHub 2.6.2 - Avvio applicazione', fill=(119, 151, 188, 255), font=small_font)
           canvas.convert('RGB').save(root / 'schoolhub_splash.png', 'PNG')
 
           spec = spec_path.read_text(encoding='utf-8')
@@ -137,11 +119,23 @@ jobs:
           idx = spec.find(exe_marker)
           if idx < 0:
               raise SystemExit('EXE target not found')
-          splash_block = """splash = Splash(
+          from_marker = 'from pathlib import Path'
+          if from_marker not in spec:
+              spec = from_marker + '\n' + spec
+              idx = spec.find(exe_marker)
+          splash_block = """class AnimatedSplash(Splash):
+              def generate_script(self):
+                  script = super().generate_script()
+                  animation = Path('.schoolhub-source-audit/intro.tcl').read_text(encoding='utf-8')
+                  script += '\\n' + animation
+                  Path(self.script_name).write_text(script, encoding='utf-8')
+                  return script
+
+          splash = AnimatedSplash(
               'schoolhub_splash.png',
               binaries=a.binaries,
               datas=a.datas,
-              text_pos=(46, 344),
+              text_pos=(46, 305),
               text_size=10,
               text_color='#d7e8ff',
               text_font='Segoe UI',
@@ -154,7 +148,7 @@ jobs:
           open_pos = spec.find('(', spec.find(exe_marker))
           spec = spec[:open_pos+1] + '\n    splash,\n    splash.binaries,' + spec[open_pos+1:]
           spec_path.write_text(spec, encoding='utf-8')
-          print('SchoolHub 2.4 splash OK')
+          print('Animated boot intro OK')
           '@ | Set-Content ".schoolhub-v2.2\patch_24.py" -Encoding UTF8
           python ".schoolhub-v2.2\patch_24.py"
 
@@ -213,7 +207,7 @@ jobs:
               'safe default remote': 'DEFAULT_REMOTE = ""' in gui,
               'auto sync default off': '"auto_sync": False' in gui,
               'auto start default off': '"auto_start": False' in gui,
-              'version 2.6.1': 'APP_VERSION = "2.6.1"' in gui,
+              'version 2.6.2': 'APP_VERSION = "2.6.2"' in gui,
               'daily update cache': 'UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60' in gui,
               'minute clock': 'after(60000, self.update_clock)' in gui,
               'single instance': 'def _acquire_single_instance()' in gui,
@@ -255,7 +249,7 @@ jobs:
               'diagnostic export': 'def export_diagnostics' in gui and 'schoolhub-sanitized.log' in gui and '_redact_diagnostic_text' in gui,
               'safe repair': 'def repair_schoolhub' in gui and 'NON verranno eliminati' in gui,
               'support error codes': 'SH-GIT-101' in gui and 'SH-SYNC-302' in gui and 'SH-UPD-401' in gui,
-              'windows file metadata': 'version="version_info.txt"' in spec and "ProductVersion', u'2.6.1'" in version_info,
+              'windows file metadata': 'version="version_info.txt"' in spec and "ProductVersion', u'2.6.2'" in version_info,
               'safe uninstall': 'CurUninstallStepChanged' in installer and 'MB_DEFBUTTON2' in installer,
               'nondefault branch fetch': 'fetch_ref = f"refs/heads/{requested}:refs/remotes/origin/{requested}"' in gui and '["fetch", "--depth", "1", "origin", fetch_ref]' in gui,
               'branch error lists remotes': '"ls-remote", "--heads", remote' in gui,
@@ -340,7 +334,7 @@ jobs:
           if ($size -gt 160MB) { throw "UltraLight size budget exceeded: $mb MB" }
           $vi = (Get-Item ".\dist\SchoolHub.exe").VersionInfo
           Write-Host "EXE ProductVersion: $($vi.ProductVersion) Company: $($vi.CompanyName)"
-          if ($vi.ProductVersion -notlike "2.6.1*") { throw "EXE ProductVersion metadata missing" }
+          if ($vi.ProductVersion -notlike "2.6.2*") { throw "EXE ProductVersion metadata missing" }
           if ($vi.CompanyName -ne "SchoolHub") { throw "EXE CompanyName metadata missing" }
 
       - name: Self-test EXE
@@ -373,7 +367,19 @@ jobs:
           if (-not $result.checks.nondefault_branch_clone) { throw "Non-default branch clone regression failed" }
           if (-not $result.checks.responsive_ui_core) { throw "Responsive UI core test failed" }
           if (-not $result.checks.safe_default_remote) { throw "Privacy remote failed" }
-          if ($result.checks.version -ne "2.6.1") { throw "Wrong version" }
+          if ($result.checks.version -ne "2.6.2") { throw "Wrong version" }
+
+      - name: Frozen independent restart regression
+        shell: pwsh
+        run: |
+          $out = Join-Path $PWD "dist\restart-smoke.json"
+          $p = Start-Process ".\dist\SchoolHub.exe" -ArgumentList @("--restart-smoke", $out) -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "Restart parent failed" }
+          $deadline = (Get-Date).AddSeconds(60)
+          while (!(Test-Path $out) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 1 }
+          if (!(Test-Path $out)) { throw "Restarted app did not start after parent exit" }
+          $result = Get-Content $out -Raw | ConvertFrom-Json
+          if (!$result.ok) { throw "Restarted app lost its Python runtime" }
 
       - name: GUI idle smoke test
         shell: pwsh
@@ -434,7 +440,7 @@ jobs:
           Write-Host "Installer size: $([math]::Round((Get-Item '.\dist\SchoolHub-Setup.exe').Length / 1MB, 1)) MB"
           $setupVi = (Get-Item ".\dist\SchoolHub-Setup.exe").VersionInfo
           Write-Host "Setup ProductVersion: $($setupVi.ProductVersion) Company: $($setupVi.CompanyName)"
-          if ($setupVi.ProductVersion -notlike "2.6.1*") { throw "Setup ProductVersion metadata missing" }
+          if ($setupVi.ProductVersion -notlike "2.6.2*") { throw "Setup ProductVersion metadata missing" }
           if ($setupVi.CompanyName.Trim() -ne "SchoolHub") { throw "Setup CompanyName metadata missing" }
 
       - name: Checksum
@@ -450,7 +456,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SchoolHub-Windows-v2.6.1-Responsive
+          name: SchoolHub-Windows-v2.6.2-Responsive
           path: |
             dist/SchoolHub.exe
             dist/SchoolHub.exe.sha256.txt
@@ -466,11 +472,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "schoolhub-v2.6.1"
-          $notes = "SchoolHub 2.6.1 Branch + Responsive Fix: corregge SH-GIT-102 quando il branch scelto esiste su GitHub ma non è il branch predefinito, verificando i branch remoti prima del clone e clonando esplicitamente quello selezionato. Rende l interfaccia responsive con contenuto scrollabile, sidebar compatta sotto 900px, finestra minima 720x520, testi adattivi e wizard ridimensionabile. Mantiene tutte le funzioni 2.6.0, Vault, installer, diagnostica, Git LFS e sync editor-safe."
+          $tag = "schoolhub-v2.6.2"
+          $notes = "SchoolHub 2.6.2: riavvio indipendente dopo aggiornamento per evitare il riuso della cartella temporanea Python eliminata; intro animata centrata attiva durante l estrazione e l avvio; finestra principale nascosta fino al completamento del layout. Corregge selezione account GitHub e recupero autenticazione SH-GIT-101; chiarisce che i repository pubblici sono consentiti. Include test Windows del riavvio EXE e mantiene le correzioni branch e responsive 2.6.1. Per passare da una versione precedente, scaricare ed eseguire SchoolHub-Setup.exe dopo aver chiuso SchoolHub; il vecchio updater non contiene ancora la correzione."
           if (gh release view $tag --repo "$env:GITHUB_REPOSITORY" *> $null) {
             gh release upload $tag ".\dist\SchoolHub.exe#SchoolHub.exe" ".\dist\SchoolHub.exe.sha256.txt#SchoolHub.exe.sha256.txt" ".\dist\SchoolHub-Setup.exe#SchoolHub-Setup.exe" ".\dist\SchoolHub-Setup.exe.sha256.txt#SchoolHub-Setup.exe.sha256.txt" --clobber --repo "$env:GITHUB_REPOSITORY"
-            gh release edit $tag --title "SchoolHub 2.6.1 Branch + Responsive Fix" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
+            gh release edit $tag --title "SchoolHub 2.6.2 Update Restart + Animated Intro" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
           } else {
-            gh release create $tag ".\dist\SchoolHub.exe#SchoolHub.exe" ".\dist\SchoolHub.exe.sha256.txt#SchoolHub.exe.sha256.txt" ".\dist\SchoolHub-Setup.exe#SchoolHub-Setup.exe" ".\dist\SchoolHub-Setup.exe.sha256.txt#SchoolHub-Setup.exe.sha256.txt" --target "$env:GITHUB_SHA" --title "SchoolHub 2.6.1 Branch + Responsive Fix" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
+            gh release create $tag ".\dist\SchoolHub.exe#SchoolHub.exe" ".\dist\SchoolHub.exe.sha256.txt#SchoolHub.exe.sha256.txt" ".\dist\SchoolHub-Setup.exe#SchoolHub-Setup.exe" ".\dist\SchoolHub-Setup.exe.sha256.txt#SchoolHub-Setup.exe.sha256.txt" --target "$env:GITHUB_SHA" --title "SchoolHub 2.6.2 Update Restart + Animated Intro" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
           }

@@ -1,5 +1,5 @@
 #define MyAppName "SchoolHub"
-#define MyAppVersion "2.6.1"
+#define MyAppVersion "2.6.2"
 #define MyAppPublisher "SchoolHub"
 #define MyAppExeName "SchoolHub.exe"
 
@@ -28,12 +28,12 @@ SetupLogging=yes
 UninstallDisplayIcon={app}\{#MyAppExeName}
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-VersionInfoVersion=2.6.1.0
+VersionInfoVersion=2.6.2.0
 VersionInfoProductName=SchoolHub
 VersionInfoDescription=SchoolHub Installer
 VersionInfoCompany=SchoolHub
 VersionInfoCopyright=Copyright © 2026 SchoolHub
-VersionInfoProductVersion=2.6.1.0
+VersionInfoProductVersion=2.6.2.0
 
 [Languages]
 Name: "italian"; MessagesFile: "compiler:Languages\Italian.isl"
