@@ -32,10 +32,10 @@ CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 LOG_FILE = os.path.join(APP_DIR, "schoolhub.log")
 SYNC_STATE_FILE = os.path.join(APP_DIR, "sync_state.json")
 
-APP_VERSION = "2.6.0"
+APP_VERSION = "2.6.1"
 RELEASE_API = "https://api.github.com/repos/MeloniMirko/SchoolHub/releases/latest"
 RELEASES_API = "https://api.github.com/repos/MeloniMirko/SchoolHub/releases?per_page=30"
-UPDATE_USER_AGENT = "SchoolHub-Updater/2.6.0"
+UPDATE_USER_AGENT = "SchoolHub-Updater/2.6.1"
 UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 UPDATE_STAMP_FILE = os.path.join(APP_DIR, "last_update_check.txt")
 GIT_TIMEOUT_SECONDS = 180
@@ -401,10 +401,12 @@ class SchoolHub:
 
         # Serve a invalidare callback provenienti da vecchie pagine
         self.page_generation = 0
+        self._responsive_after = None
+        self._sidebar_compact = False
 
         self.root.title(f"SchoolHub {APP_VERSION}")
         self.root.geometry("1180x760")
-        self.root.minsize(980, 650)
+        self.root.minsize(720, 520)
         self.root.configure(bg=BG)
         icon_path = resource_path("schoolhub_icon.png")
         if icon_path:
@@ -415,8 +417,10 @@ class SchoolHub:
                 self._app_icon = None
 
         self.build_ui()
+        self.root.bind("<Configure>", self._schedule_responsive_layout, add="+")
 
         self.navigate("Home")
+        self.root.after(100, self._apply_responsive_layout)
 
         if not self.onboarding_complete and not self.remote:
             self.root.after(500, lambda: self.show_github_setup(first_run=True))
@@ -550,7 +554,7 @@ class SchoolHub:
         # MeloniMirko/Scuola. DEFAULT_REMOTE is empty, so there is no public
         # repository that can appear here unless the user configured it.
         remote = scuola.get("remote") or old.get("remote") or DEFAULT_REMOTE
-        branch = scuola.get("branch") or old.get("branch") or DEFAULT_BRANCH
+        branch = str(scuola.get("branch") or old.get("branch") or DEFAULT_BRANCH).strip() or DEFAULT_BRANCH
         github_user = scuola.get("github_user") or old.get("github_user") or ""
         if not github_user:
             import re
@@ -934,6 +938,8 @@ class SchoolHub:
             bg=PANEL,
             width=225
         )
+        self.sidebar_full_width = 225
+        self.sidebar_compact_width = 76
 
         self.sidebar.pack(
             side="left",
@@ -942,16 +948,18 @@ class SchoolHub:
 
         self.sidebar.pack_propagate(False)
 
-        logo = tk.Frame(
+        self.logo_frame = tk.Frame(
             self.sidebar,
             bg=PANEL
         )
 
-        logo.pack(
+        self.logo_frame.pack(
             fill="x",
             padx=20,
             pady=(22, 26)
         )
+
+        logo = self.logo_frame
 
         icon_path = resource_path("schoolhub_icon.png")
         if icon_path:
@@ -961,21 +969,23 @@ class SchoolHub:
             except Exception:
                 self.sidebar_icon = None
 
-        tk.Label(
+        self.logo_title = tk.Label(
             logo,
             text="SCHOOLHUB",
             font=("Segoe UI", 22, "bold"),
             fg=TEXT,
             bg=PANEL
-        ).pack(anchor="w")
+        )
+        self.logo_title.pack(anchor="w")
 
-        tk.Label(
+        self.logo_subtitle = tk.Label(
             logo,
             text="SECURE SCHOOL WORKSPACE",
             font=("Segoe UI", 8, "bold"),
             fg=CYAN,
             bg=PANEL
-        ).pack(anchor="w", pady=(2,0))
+        )
+        self.logo_subtitle.pack(anchor="w", pady=(2,0))
 
         self.nav_buttons = {}
 
@@ -987,10 +997,11 @@ class SchoolHub:
         self.add_nav("⌘", "Dispositivi")
         self.add_nav("⚙", "Impostazioni")
 
-        bottom = tk.Frame(
+        self.sidebar_bottom = tk.Frame(
             self.sidebar,
             bg=PANEL
         )
+        bottom = self.sidebar_bottom
 
         bottom.pack(
             side="bottom",
@@ -1087,17 +1098,35 @@ class SchoolHub:
             padx=32
         )
 
-        self.content = tk.Frame(
-            self.main,
-            bg=BG
+        self.content_shell = tk.Frame(self.main, bg=BG)
+        self.content_shell.pack(fill="both", expand=True, padx=0, pady=(0, 0))
+
+        self.content_canvas = tk.Canvas(
+            self.content_shell,
+            bg=BG,
+            highlightthickness=0,
+            bd=0,
+        )
+        self.content_scrollbar = ttk.Scrollbar(
+            self.content_shell,
+            orient="vertical",
+            command=self.content_canvas.yview,
+        )
+        self.content_canvas.configure(yscrollcommand=self.content_scrollbar.set)
+        self.content_scrollbar.pack(side="right", fill="y")
+        self.content_canvas.pack(side="left", fill="both", expand=True)
+
+        self.content = tk.Frame(self.content_canvas, bg=BG)
+        self.content_window = self.content_canvas.create_window(
+            (32, 0),
+            window=self.content,
+            anchor="nw",
         )
 
-        self.content.pack(
-            fill="both",
-            expand=True,
-            padx=32,
-            pady=(0, 25)
-        )
+        self.content.bind("<Configure>", self._on_content_configure, add="+")
+        self.content_canvas.bind("<Configure>", self._on_canvas_configure, add="+")
+        self.content_canvas.bind("<Enter>", self._bind_content_wheel, add="+")
+        self.content_canvas.bind("<Leave>", self._unbind_content_wheel, add="+")
 
     # ========================================================
     # NAVIGATION
@@ -1129,6 +1158,136 @@ class SchoolHub:
         )
 
         self.nav_buttons[name] = button
+        if not hasattr(self, "nav_meta"):
+            self.nav_meta = {}
+        self.nav_meta[name] = (icon, name)
+
+    def _on_content_configure(self, _event=None):
+        if not getattr(self, "content_canvas", None):
+            return
+        try:
+            self.content_canvas.configure(scrollregion=self.content_canvas.bbox("all"))
+        except tk.TclError:
+            pass
+
+    def _on_canvas_configure(self, event):
+        if not getattr(self, "content_canvas", None):
+            return
+        try:
+            left_pad = 18 if self._sidebar_compact else 32
+            right_pad = left_pad
+            width = max(320, int(event.width) - left_pad - right_pad)
+            requested = max(int(self.content.winfo_reqheight()), int(event.height))
+            self.content_canvas.coords(self.content_window, left_pad, 0)
+            self.content_canvas.itemconfigure(
+                self.content_window,
+                width=width,
+                height=requested,
+            )
+            self.content_canvas.configure(scrollregion=self.content_canvas.bbox("all"))
+            self._apply_responsive_wraps(width)
+        except tk.TclError:
+            pass
+
+    def _bind_content_wheel(self, _event=None):
+        try:
+            self.root.bind_all("<MouseWheel>", self._on_content_mousewheel)
+        except tk.TclError:
+            pass
+
+    def _unbind_content_wheel(self, _event=None):
+        try:
+            self.root.unbind_all("<MouseWheel>")
+        except tk.TclError:
+            pass
+
+    def _on_content_mousewheel(self, event):
+        try:
+            if self.content_canvas.bbox("all") and self.content_canvas.winfo_height() < self.content.winfo_reqheight():
+                self.content_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        except tk.TclError:
+            pass
+
+    def _schedule_responsive_layout(self, event=None):
+        if event is not None and event.widget is not self.root:
+            return
+        try:
+            if self._responsive_after is not None:
+                self.root.after_cancel(self._responsive_after)
+            self._responsive_after = self.root.after(60, self._apply_responsive_layout)
+        except tk.TclError:
+            pass
+
+    def _apply_responsive_wraps(self, available_width=None):
+        if not self.widget_alive(getattr(self, "content", None)):
+            return
+        try:
+            if available_width is None:
+                available_width = max(320, self.content.winfo_width())
+            cap = max(240, int(available_width) - 70)
+            stack = [self.content]
+            while stack:
+                parent = stack.pop()
+                for widget in parent.winfo_children():
+                    stack.append(widget)
+                    if isinstance(widget, tk.Label):
+                        try:
+                            raw = widget.cget("wraplength")
+                            current = int(float(raw)) if raw not in ("", None) else 0
+                        except Exception:
+                            current = 0
+                        if current > 0:
+                            if not hasattr(widget, "_schoolhub_wrap_base"):
+                                widget._schoolhub_wrap_base = current
+                            widget.configure(wraplength=min(widget._schoolhub_wrap_base, cap))
+        except tk.TclError:
+            pass
+
+    def _apply_responsive_layout(self):
+        self._responsive_after = None
+        if not self.running:
+            return
+        try:
+            width = max(1, self.root.winfo_width())
+            compact = width < 900
+            if compact != self._sidebar_compact:
+                self._sidebar_compact = compact
+                self.sidebar.configure(
+                    width=self.sidebar_compact_width if compact else self.sidebar_full_width
+                )
+                for name, button in self.nav_buttons.items():
+                    icon, label = self.nav_meta.get(name, ("•", name))
+                    button.configure(
+                        text=f" {icon} " if compact else f"  {icon}   {label}",
+                        anchor="center" if compact else "w",
+                        padx=8 if compact else 18,
+                        font=("Segoe UI", 12 if compact else 11),
+                    )
+                if compact:
+                    self.logo_title.configure(text="SH", font=("Segoe UI", 18, "bold"))
+                    self.logo_subtitle.pack_forget()
+                    try:
+                        self.online_label.pack_forget()
+                    except tk.TclError:
+                        pass
+                else:
+                    self.logo_title.configure(text="SCHOOLHUB", font=("Segoe UI", 22, "bold"))
+                    if not self.logo_subtitle.winfo_manager():
+                        self.logo_subtitle.pack(anchor="w", pady=(2,0))
+                    if not self.online_label.winfo_manager():
+                        self.online_label.pack(side="left")
+            header_pad = 18 if compact else 32
+            self.page_title.configure(font=("Segoe UI", 20 if compact else 24, "bold"))
+            self.page_title.pack_configure(padx=header_pad)
+            self.time_label.pack_configure(padx=header_pad)
+            self.root.after_idle(lambda: self._on_canvas_configure(
+                type("_E", (), {
+                    "width": self.content_canvas.winfo_width(),
+                    "height": self.content_canvas.winfo_height(),
+                })()
+            ))
+        except tk.TclError:
+            pass
 
     def navigate(self, page):
 
@@ -2686,8 +2845,12 @@ class SchoolHub:
         win = tk.Toplevel(self.root)
         win.title("Configura SchoolHub")
         win.configure(bg=BG)
-        win.geometry("760x610")
-        win.minsize(700, 560)
+        screen_w = max(640, win.winfo_screenwidth())
+        screen_h = max(520, win.winfo_screenheight())
+        dialog_w = min(760, max(580, screen_w - 80))
+        dialog_h = min(610, max(500, screen_h - 120))
+        win.geometry(f"{dialog_w}x{dialog_h}")
+        win.minsize(min(580, dialog_w), min(500, dialog_h))
         win.transient(self.root)
         try:
             win.attributes("-topmost", True)
@@ -3017,7 +3180,7 @@ class SchoolHub:
         github_head = tk.Frame(card, bg=PANEL)
         github_head.pack(fill="x", padx=22, pady=(0,8))
         github_head_left = tk.Frame(github_head, bg=PANEL)
-        github_head_left.pack(side="left", fill="x", expand=True)
+        github_head_left.pack(fill="x")
         tk.Label(github_head_left, text="SINCRONIZZAZIONE GITHUB", font=("Segoe UI", 9, "bold"), fg=CYAN, bg=PANEL).pack(anchor="w")
         self.settings_dirty_label = tk.Label(
             github_head_left,
@@ -3616,34 +3779,73 @@ class SchoolHub:
             pass
         return self.remote
 
+    def _remote_branch_names(self):
+        """Read actual remote branches before cloning.
+
+        A shallow clone normally fetches only the repository default branch. That
+        used to make an existing non-default branch (for example master while
+        main is default) look missing.
+        """
+        remote = self._git_remote_for_auth()
+        code, out, err = self.git(
+            ["ls-remote", "--heads", remote],
+            cwd=APP_DIR,
+            timeout=60,
+        )
+        if code != 0:
+            raise WorkspaceError(err or out or "Impossibile leggere i branch del repository GitHub.")
+        names = set()
+        for line in (out or "").splitlines():
+            parts = line.strip().split()
+            if len(parts) < 2:
+                continue
+            ref = parts[1].strip()
+            prefix = "refs/heads/"
+            if ref.startswith(prefix):
+                names.add(ref[len(prefix):])
+        return names
+
     def _clone_remote(self, destination):
         os.makedirs(os.path.dirname(destination), exist_ok=True)
-        code, out, err = self.git(
-            ["clone", "--depth", "1", "--no-tags", self._git_remote_for_auth(), destination],
-            cwd=os.path.dirname(destination)
-        )
+        requested = str(self.branch or DEFAULT_BRANCH).strip() or DEFAULT_BRANCH
+        remote = self._git_remote_for_auth()
+        remote_branches = self._remote_branch_names()
+
+        clone_args = ["clone", "--depth", "1", "--no-tags"]
+        if requested in remote_branches:
+            clone_args += ["--branch", requested, "--single-branch"]
+        clone_args += [remote, destination]
+
+        code, out, err = self.git(clone_args, cwd=os.path.dirname(destination))
         if code != 0:
             raise WorkspaceError(err or out or "Impossibile scaricare il repository GitHub.")
 
-        # Keep credentials separated by GitHub repository path on this Windows user.
         self.git(["config", "credential.useHttpPath", "true"], cwd=destination)
 
-        # Check out the requested branch if it exists remotely. On an empty repo,
-        # point HEAD to the requested unborn branch without requiring a commit.
-        code, _, _ = self.git(["rev-parse", "--verify", f"refs/remotes/origin/{self.branch}"], cwd=destination)
-        if code == 0:
-            code, out, err = self.git(["checkout", "-B", self.branch, f"origin/{self.branch}"], cwd=destination)
+        if requested in remote_branches:
+            code, out, err = self.git(["rev-parse", "--verify", "HEAD"], cwd=destination)
             if code != 0:
-                raise WorkspaceError(err or out or f"Impossibile aprire il branch {self.branch}.")
-        else:
-            code_head, _, _ = self.git(["rev-parse", "--verify", "HEAD"], cwd=destination)
-            if code_head == 0:
+                raise WorkspaceError(err or out or f"Impossibile aprire il branch {requested}.")
+            code, out, err = self.git(["branch", "--show-current"], cwd=destination)
+            current = (out or "").strip()
+            if code != 0 or current != requested:
                 raise WorkspaceError(
-                    f"Il branch '{self.branch}' non esiste su GitHub. Imposta nelle Impostazioni il branch corretto prima di sincronizzare."
+                    f"Git ha scaricato il repository ma non ha aperto correttamente il branch '{requested}'."
                 )
-            code, out, err = self.git(["symbolic-ref", "HEAD", f"refs/heads/{self.branch}"], cwd=destination)
-            if code != 0:
-                raise WorkspaceError(err or out or f"Impossibile inizializzare il branch {self.branch}.")
+            return
+
+        if remote_branches:
+            available = ", ".join(sorted(remote_branches, key=str.lower)[:12])
+            suffix = "" if len(remote_branches) <= 12 else ", …"
+            raise WorkspaceError(
+                f"Il branch '{requested}' non esiste su GitHub. "
+                f"Branch disponibili: {available}{suffix}"
+            )
+
+        # Empty repository: keep the requested branch as an unborn branch.
+        code, out, err = self.git(["symbolic-ref", "HEAD", f"refs/heads/{requested}"], cwd=destination)
+        if code != 0:
+            raise WorkspaceError(err or out or f"Impossibile inizializzare il branch {requested}.")
 
     def _get_sync_source(self, password, temp_root):
         """Create a stable plaintext snapshot used for the whole sync operation."""
