@@ -1,8 +1,8 @@
 # UTF-8
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(2, 6, 0, 0),
-    prodvers=(2, 6, 0, 0),
+    filevers=(2, 6, 1, 0),
+    prodvers=(2, 6, 1, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -17,12 +17,12 @@ VSVersionInfo(
         [
           StringStruct(u'CompanyName', u'SchoolHub'),
           StringStruct(u'FileDescription', u'SchoolHub Secure School Workspace'),
-          StringStruct(u'FileVersion', u'2.6.0'),
+          StringStruct(u'FileVersion', u'2.6.1'),
           StringStruct(u'InternalName', u'SchoolHub'),
           StringStruct(u'LegalCopyright', u'Copyright © 2026 SchoolHub'),
           StringStruct(u'OriginalFilename', u'SchoolHub.exe'),
           StringStruct(u'ProductName', u'SchoolHub'),
-          StringStruct(u'ProductVersion', u'2.6.0')
+          StringStruct(u'ProductVersion', u'2.6.1')
         ]
       )
     ]),
