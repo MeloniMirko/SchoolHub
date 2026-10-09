@@ -1125,8 +1125,7 @@ class SchoolHub:
 
         self.content.bind("<Configure>", self._on_content_configure, add="+")
         self.content_canvas.bind("<Configure>", self._on_canvas_configure, add="+")
-        self.content_canvas.bind("<Enter>", self._bind_content_wheel, add="+")
-        self.content_canvas.bind("<Leave>", self._unbind_content_wheel, add="+")
+        self.root.bind_all("<MouseWheel>", self._on_content_mousewheel, add="+")
 
     # ========================================================
     # NAVIGATION
@@ -1189,22 +1188,13 @@ class SchoolHub:
         except tk.TclError:
             pass
 
-    def _bind_content_wheel(self, _event=None):
-        try:
-            self.root.bind_all("<MouseWheel>", self._on_content_mousewheel)
-        except tk.TclError:
-            pass
-
-    def _unbind_content_wheel(self, _event=None):
-        try:
-            self.root.unbind_all("<MouseWheel>")
-        except tk.TclError:
-            pass
-
     def _on_content_mousewheel(self, event):
         try:
+            if isinstance(event.widget, (tk.Text, tk.Listbox)):
+                return
             if self.content_canvas.bbox("all") and self.content_canvas.winfo_height() < self.content.winfo_reqheight():
-                self.content_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                step = -1 if event.delta > 0 else 1
+                self.content_canvas.yview_scroll(step * 3, "units")
         except tk.TclError:
             pass
 
@@ -1355,6 +1345,12 @@ class SchoolHub:
 
         self.repo_label = None
         self.activity_box = None
+
+        try:
+            self.content_canvas.yview_moveto(0.0)
+            self.root.after_idle(self._apply_responsive_layout)
+        except tk.TclError:
+            pass
 
     # ========================================================
     # WIDGET CHECK
@@ -5078,6 +5074,64 @@ def _frozen_self_test(output_path):
         if "audio.mp3" not in listed or "video.mp4" not in listed:
             raise RuntimeError("MP3/MP4 non vengono gestiti da Git LFS")
         result["checks"]["media_git_lfs"] = True
+
+        # Regression: requested branch exists remotely but is not the default.
+        branch_seed = os.path.join(temp_root, "branch-seed")
+        branch_remote = os.path.join(temp_root, "branch-remote.git")
+        branch_clone = os.path.join(temp_root, "branch-clone")
+        os.makedirs(branch_seed, exist_ok=True)
+
+        def run_branch_git(cwd, args):
+            cp = subprocess.run(
+                [git_exe] + args,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=git_env,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+            )
+            if cp.returncode != 0:
+                raise RuntimeError(cp.stderr or cp.stdout or f"Git branch self-test failed: {args}")
+            return cp.stdout.strip()
+
+        run_branch_git(branch_seed, ["init", "-b", "main"])
+        run_branch_git(branch_seed, ["config", "user.name", "SchoolHub Test"])
+        run_branch_git(branch_seed, ["config", "user.email", "schoolhub-test@example.invalid"])
+        with open(os.path.join(branch_seed, "main.txt"), "w", encoding="utf-8") as fh:
+            fh.write("main")
+        run_branch_git(branch_seed, ["add", "main.txt"])
+        run_branch_git(branch_seed, ["commit", "-m", "main"])
+        run_branch_git(branch_seed, ["checkout", "-b", "master"])
+        with open(os.path.join(branch_seed, "master.txt"), "w", encoding="utf-8") as fh:
+            fh.write("master")
+        run_branch_git(branch_seed, ["add", "master.txt"])
+        run_branch_git(branch_seed, ["commit", "-m", "master"])
+        run_branch_git(temp_root, ["init", "--bare", branch_remote])
+        run_branch_git(branch_seed, ["remote", "add", "origin", branch_remote])
+        run_branch_git(branch_seed, ["push", "origin", "main", "master"])
+        run_branch_git(branch_remote, ["symbolic-ref", "HEAD", "refs/heads/main"])
+
+        branch_probe = object.__new__(SchoolHub)
+        branch_probe.remote = branch_remote
+        branch_probe.github_user = ""
+        branch_probe.branch = "master"
+        SchoolHub._clone_remote(branch_probe, branch_clone)
+        current_branch = run_branch_git(branch_clone, ["branch", "--show-current"])
+        if current_branch != "master" or not os.path.isfile(os.path.join(branch_clone, "master.txt")):
+            raise RuntimeError("Clone di branch non predefinito fallito")
+        if os.path.isfile(os.path.join(branch_clone, "main.txt")):
+            raise RuntimeError("Clone branch master ha aperto per errore il branch main")
+        result["checks"]["nondefault_branch_clone"] = True
+
+        result["checks"]["responsive_ui_core"] = (
+            hasattr(SchoolHub, "_apply_responsive_layout")
+            and hasattr(SchoolHub, "_on_canvas_configure")
+            and hasattr(SchoolHub, "_on_content_mousewheel")
+        )
+        if not result["checks"]["responsive_ui_core"]:
+            raise RuntimeError("Core UI responsive mancante")
 
         ws = os.path.join(temp_root, "Workspaces", "Scuola")
         vault = os.path.join(temp_root, "Vaults", "Scuola.vault")
