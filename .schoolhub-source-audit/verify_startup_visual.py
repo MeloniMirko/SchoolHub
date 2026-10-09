@@ -46,7 +46,10 @@ try:
     assert ImageChops.difference(first, second).getbbox(), 'Intro is static, not animated'
     ready = wait_stage('ready')
     time.sleep(0.2)
-    ImageGrab.grab(window=ready['hwnd']).save('dist/startup-ready.png')
+    main_frame = ImageGrab.grab(window=ready['hwnd']).convert('RGB')
+    main_frame.save('dist/startup-ready.png')
+    white_main = sum(min(rgb) > 235 for rgb in main_frame.getdata()) / (main_frame.width * main_frame.height)
+    assert white_main < 0.15, f'White/unpainted main window: {white_main:.1%}'
     assert ready['width'] >= 720 and ready['height'] >= 520, ready
     print('PASS: centered visible intro, dark first frame, moving animation, main window ready')
 finally:
