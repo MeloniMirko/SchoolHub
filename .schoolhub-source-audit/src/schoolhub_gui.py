@@ -32,10 +32,10 @@ CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 LOG_FILE = os.path.join(APP_DIR, "schoolhub.log")
 SYNC_STATE_FILE = os.path.join(APP_DIR, "sync_state.json")
 
-APP_VERSION = "2.6.2"
+APP_VERSION = "2.6.3"
 RELEASE_API = "https://api.github.com/repos/MeloniMirko/SchoolHub/releases/latest"
 RELEASES_API = "https://api.github.com/repos/MeloniMirko/SchoolHub/releases?per_page=30"
-UPDATE_USER_AGENT = "SchoolHub-Updater/2.6.2"
+UPDATE_USER_AGENT = "SchoolHub-Updater/2.6.3"
 UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 UPDATE_STAMP_FILE = os.path.join(APP_DIR, "last_update_check.txt")
 GIT_TIMEOUT_SECONDS = 180
@@ -5352,6 +5352,78 @@ def _acquire_single_instance():
         return False
 
 
+def _startup_probe(root, stage):
+    """Expose only window geometry to the Windows visual regression runner."""
+    if len(sys.argv) < 3 or sys.argv[1] != "--startup-visual-test":
+        return
+    import ctypes
+    from ctypes import wintypes
+    get_parent = ctypes.windll.user32.GetParent
+    get_parent.argtypes = [wintypes.HWND]
+    get_parent.restype = wintypes.HWND
+    hwnd = get_parent(root.winfo_id()) or root.winfo_id()
+    record = {"stage": stage, "hwnd": hwnd, "width": root.winfo_width(),
+              "height": root.winfo_height(), "x": root.winfo_x(), "y": root.winfo_y(),
+              "screen_width": root.winfo_screenwidth(), "screen_height": root.winfo_screenheight()}
+    path = sys.argv[2]
+    with open(path + ".tmp", "w", encoding="utf-8") as fh:
+        json.dump(record, fh)
+    os.replace(path + ".tmp", path)
+
+
+def show_startup_intro(root):
+    """A real animated first frame, also when the bootloader splash is unavailable."""
+    import math
+    root.withdraw()
+    root.configure(bg="#081120")
+    root.overrideredirect(True)
+    root.attributes("-topmost", True)
+    width, height = 680, 410
+    x = (root.winfo_screenwidth() - width) // 2
+    y = (root.winfo_screenheight() - height) // 2
+    root.geometry(f"{width}x{height}+{x}+{y}")
+    canvas = tk.Canvas(root, width=width, height=height, bg="#081120",
+                       highlightthickness=0, borderwidth=0)
+    canvas.pack(fill="both", expand=True)
+    canvas.create_rectangle(8, 8, 671, 401, fill="#0a182c", outline="#237cff", width=2)
+    canvas.create_text(340, 112, text="SH", fill="#49bdff", font=("Segoe UI", 62, "bold"))
+    canvas.create_text(340, 220, text="SchoolHub", fill="#f4f8ff", font=("Segoe UI", 32, "bold"))
+    canvas.create_text(340, 270, text="Il tuo spazio. Sempre con te.", fill="#a1bcdc", font=("Segoe UI", 14))
+    canvas.create_rectangle(35, 327, 645, 357, fill="#112743", outline="")
+    bar = canvas.create_rectangle(36, 328, 156, 356, fill="#1479ff", outline="")
+    canvas.create_text(340, 383, text=f"Avvio di SchoolHub {APP_VERSION}", fill="#7797bc", font=("Segoe UI", 10))
+    root.update_idletasks()
+    root.deiconify()
+    root.update()
+    # Keep the boot intro until the application's own intro has actually painted.
+    try:
+        import pyi_splash
+        if pyi_splash.is_alive():
+            pyi_splash.close()
+    except (ImportError, RuntimeError):
+        pass
+    _startup_probe(root, "intro")
+    started = time.monotonic()
+    done = tk.BooleanVar(root, False)
+    duration = 3.0 if len(sys.argv) > 1 and sys.argv[1] == "--startup-visual-test" else 1.2
+
+    def animate():
+        elapsed = time.monotonic() - started
+        left = 36 + 244 * (1 - math.cos(elapsed * 3.0))
+        canvas.coords(bar, left, 328, left + 120, 356)
+        if elapsed >= duration:
+            done.set(True)
+        else:
+            root.after(33, animate)
+
+    animate()
+    root.wait_variable(done)
+    root.withdraw()
+    canvas.destroy()
+    root.overrideredirect(False)
+    root.attributes("-topmost", False)
+
+
 def main():
     # Integration probe: child must survive removal of the parent's onefile runtime.
     if len(sys.argv) >= 3 and sys.argv[1] == "--restart-smoke":
@@ -5383,18 +5455,12 @@ def main():
     root = None
     try:
         root = tk.Tk()
-        root.withdraw()
+        show_startup_intro(root)
         SchoolHub(root)
-        # Build and lay out the entire UI before mapping its first frame.
         root.update_idletasks()
         root.deiconify()
-        root.update_idletasks()
-        try:
-            import pyi_splash
-            if pyi_splash.is_alive():
-                pyi_splash.close()
-        except ImportError:
-            pass
+        root.update()
+        _startup_probe(root, "ready")
         root.mainloop()
     except Exception as exc:
         try:
