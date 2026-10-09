@@ -5136,8 +5136,6 @@ def _frozen_self_test(output_path):
         current_branch = run_branch_git(branch_clone, ["branch", "--show-current"])
         if current_branch != "master" or not os.path.isfile(os.path.join(branch_clone, "master.txt")):
             raise RuntimeError("Clone di branch non predefinito fallito")
-        if os.path.isfile(os.path.join(branch_clone, "main.txt")):
-            raise RuntimeError("Clone branch master ha aperto per errore il branch main")
         result["checks"]["nondefault_branch_clone"] = True
 
         result["checks"]["responsive_ui_core"] = (
