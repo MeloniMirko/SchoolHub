@@ -3775,73 +3775,88 @@ class SchoolHub:
             pass
         return self.remote
 
-    def _remote_branch_names(self):
-        """Read actual remote branches before cloning.
-
-        A shallow clone normally fetches only the repository default branch. That
-        used to make an existing non-default branch (for example master while
-        main is default) look missing.
-        """
-        remote = self._git_remote_for_auth()
-        code, out, err = self.git(
-            ["ls-remote", "--heads", remote],
-            cwd=APP_DIR,
-            timeout=60,
-        )
-        if code != 0:
-            raise WorkspaceError(err or out or "Impossibile leggere i branch del repository GitHub.")
-        names = set()
-        for line in (out or "").splitlines():
-            parts = line.strip().split()
-            if len(parts) < 2:
-                continue
-            ref = parts[1].strip()
-            prefix = "refs/heads/"
-            if ref.startswith(prefix):
-                names.add(ref[len(prefix):])
-        return names
-
     def _clone_remote(self, destination):
         os.makedirs(os.path.dirname(destination), exist_ok=True)
         requested = str(self.branch or DEFAULT_BRANCH).strip() or DEFAULT_BRANCH
         remote = self._git_remote_for_auth()
-        remote_branches = self._remote_branch_names()
 
-        clone_args = ["clone", "--depth", "1", "--no-tags"]
-        if requested in remote_branches:
-            clone_args += ["--branch", requested, "--single-branch"]
-        clone_args += [remote, destination]
-
-        code, out, err = self.git(clone_args, cwd=os.path.dirname(destination))
+        # Preserve the proven sync behavior: clone the repository normally first.
+        # A shallow clone contains only the default branch, so an existing
+        # non-default branch may not yet appear under refs/remotes/origin/*.
+        code, out, err = self.git(
+            ["clone", "--depth", "1", "--no-tags", remote, destination],
+            cwd=os.path.dirname(destination),
+        )
         if code != 0:
             raise WorkspaceError(err or out or "Impossibile scaricare il repository GitHub.")
 
         self.git(["config", "credential.useHttpPath", "true"], cwd=destination)
 
-        if requested in remote_branches:
-            code, out, err = self.git(["rev-parse", "--verify", "HEAD"], cwd=destination)
+        code, _, _ = self.git(
+            ["rev-parse", "--verify", f"refs/remotes/origin/{requested}"],
+            cwd=destination,
+        )
+
+        if code != 0:
+            # Explicitly fetch the selected branch. This fixes repositories where
+            # e.g. main is default but master still exists and was omitted by the
+            # shallow clone.
+            fetch_ref = f"refs/heads/{requested}:refs/remotes/origin/{requested}"
+            fetch_code, fetch_out, fetch_err = self.git(
+                ["fetch", "--depth", "1", "origin", fetch_ref],
+                cwd=destination,
+                timeout=90,
+            )
+            if fetch_code == 0:
+                code, _, _ = self.git(
+                    ["rev-parse", "--verify", f"refs/remotes/origin/{requested}"],
+                    cwd=destination,
+                )
+
+        if code == 0:
+            code, out, err = self.git(
+                ["checkout", "-B", requested, f"origin/{requested}"],
+                cwd=destination,
+            )
             if code != 0:
                 raise WorkspaceError(err or out or f"Impossibile aprire il branch {requested}.")
-            code, out, err = self.git(["branch", "--show-current"], cwd=destination)
-            current = (out or "").strip()
-            if code != 0 or current != requested:
-                raise WorkspaceError(
-                    f"Git ha scaricato il repository ma non ha aperto correttamente il branch '{requested}'."
-                )
             return
 
-        if remote_branches:
-            available = ", ".join(sorted(remote_branches, key=str.lower)[:12])
-            suffix = "" if len(remote_branches) <= 12 else ", …"
-            raise WorkspaceError(
-                f"Il branch '{requested}' non esiste su GitHub. "
-                f"Branch disponibili: {available}{suffix}"
-            )
-
         # Empty repository: keep the requested branch as an unborn branch.
-        code, out, err = self.git(["symbolic-ref", "HEAD", f"refs/heads/{requested}"], cwd=destination)
-        if code != 0:
-            raise WorkspaceError(err or out or f"Impossibile inizializzare il branch {requested}.")
+        code_head, _, _ = self.git(["rev-parse", "--verify", "HEAD"], cwd=destination)
+        if code_head != 0:
+            code, out, err = self.git(
+                ["symbolic-ref", "HEAD", f"refs/heads/{requested}"],
+                cwd=destination,
+            )
+            if code != 0:
+                raise WorkspaceError(err or out or f"Impossibile inizializzare il branch {requested}.")
+            return
+
+        # Non-empty repository and explicit fetch failed: the branch is really
+        # unavailable. Read branch names only to make the error useful.
+        available = []
+        list_code, list_out, _ = self.git(
+            ["ls-remote", "--heads", remote],
+            cwd=APP_DIR,
+            timeout=60,
+        )
+        if list_code == 0:
+            prefix = "refs/heads/"
+            for line in (list_out or "").splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 2 and parts[1].startswith(prefix):
+                    available.append(parts[1][len(prefix):])
+        if available:
+            shown = ", ".join(sorted(set(available), key=str.lower)[:12])
+            if len(set(available)) > 12:
+                shown += ", …"
+            raise WorkspaceError(
+                f"Il branch '{requested}' non esiste su GitHub. Branch disponibili: {shown}"
+            )
+        raise WorkspaceError(
+            f"Il branch '{requested}' non è disponibile nel repository GitHub configurato."
+        )
 
     def _get_sync_source(self, password, temp_root):
         """Create a stable plaintext snapshot used for the whole sync operation."""
