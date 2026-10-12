@@ -2592,9 +2592,15 @@ class SchoolHub:
         return names.get(state, str(state or "unknown").upper())
 
     def _local_device_state(self):
+        self._last_status_local_fingerprint = ""
+        self._last_status_remote_fingerprint = ""
         if not self.workspace.exists:
             return "unknown", 0, 0
         if not self.workspace.is_unlocked:
+            state = self._load_sync_state()
+            baseline = state.get("files", {}) if isinstance(state, dict) else {}
+            if baseline:
+                self._last_status_local_fingerprint = self._tree_fingerprint(baseline)
             return "locked", 0, 0
         local, remote, _ = self.get_status()
         if local is None:
@@ -2613,14 +2619,29 @@ class SchoolHub:
             state = "updated"
         return state, local, remote
 
-    def _build_device_record(self, state, local_pending, remote_pending, data_head):
+    def _build_device_record(self, state, local_pending, remote_pending, data_head, data_fingerprint=None):
+        fingerprint = str(data_fingerprint or "")
+        if not fingerprint:
+            try:
+                if self.workspace.is_unlocked:
+                    fingerprint = self._tree_fingerprint(
+                        self._hash_tree(self.workspace.get_unlocked_path())
+                    )
+                else:
+                    saved = self._load_sync_state()
+                    baseline = saved.get("files", {}) if isinstance(saved, dict) else {}
+                    if baseline:
+                        fingerprint = self._tree_fingerprint(baseline)
+            except Exception:
+                fingerprint = ""
         return {
-            "schema": 1,
+            "schema": 2,
             "device_id": self.device_id,
             "name": self.device_name[:80],
             "app_version": APP_VERSION,
             "data_branch": self.branch,
             "data_head": data_head or "",
+            "data_fingerprint": fingerprint,
             "state": state,
             "local_pending": int(local_pending or 0),
             "remote_pending": int(remote_pending or 0),
@@ -2714,23 +2735,67 @@ class SchoolHub:
         except Exception:
             return "ultimo contatto sconosciuto", None
 
-    def _effective_device_state(self, record, current_head):
+    def _effective_device_state(self, record, current_head, current_fingerprint=""):
+        """Use real recursive content, never commit SHA alone, to infer downloads."""
         state = str(record.get("state") or "unknown")
-        record_head = str(record.get("data_head") or "")
         if str(record.get("data_branch") or "") != self.branch:
             return "unknown"
-        if current_head and record_head and current_head != record_head:
-            if state in ("upload", "both", "conflict"):
-                return "both" if state != "conflict" else "conflict"
+
+        record_fingerprint = str(record.get("data_fingerprint") or "")
+        current_fingerprint = str(current_fingerprint or "")
+
+        if record_fingerprint and current_fingerprint:
+            if record_fingerprint == current_fingerprint:
+                # Same nested files byte-for-byte: a different commit is irrelevant.
+                if state in ("download", "updated", "unknown"):
+                    return "updated"
+                return state
+            if state == "conflict":
+                return "conflict"
+            if state in ("upload", "both"):
+                return "both"
+            if state == "locked":
+                return "locked"
             return "download"
+
+        # Old device records have no fingerprint. Do not invent a download from
+        # a different HEAD: wait for that device to check in with schema 2.
         return state
+
+    def _remote_content_fingerprint(self):
+        if not self.remote:
+            return ""
+        temp_root = tempfile.mkdtemp(prefix="schoolhub-remote-fingerprint-")
+        repo = os.path.join(temp_root, "repo")
+        try:
+            self._clone_remote(repo)
+            return self._tree_fingerprint(self._hash_tree(repo))
+        finally:
+            shutil.rmtree(temp_root, ignore_errors=True)
 
     def _publish_device_status_quiet(self, state="updated", local_pending=0, remote_pending=0, data_head=None):
         try:
             if not self.remote:
                 return
             head = data_head if data_head is not None else self._current_remote_data_head()
-            self._publish_device_record(self._build_device_record(state, local_pending, remote_pending, head))
+            fingerprint = ""
+            try:
+                if self.workspace.is_unlocked:
+                    fingerprint = self._tree_fingerprint(
+                        self._hash_tree(self.workspace.get_unlocked_path())
+                    )
+                else:
+                    saved = self._load_sync_state()
+                    baseline = saved.get("files", {}) if isinstance(saved, dict) else {}
+                    if baseline:
+                        fingerprint = self._tree_fingerprint(baseline)
+            except Exception:
+                fingerprint = ""
+            self._publish_device_record(
+                self._build_device_record(
+                    state, local_pending, remote_pending, head, fingerprint
+                )
+            )
         except Exception as exc:
             code = self._error_code("sync", exc)
             self.write_log(f"⚠ [{code}] Stato dispositivo non pubblicato: {exc}")
@@ -2778,7 +2843,7 @@ class SchoolHub:
         loading = tk.Label(list_card, text="Caricamento dispositivi...", font=("Segoe UI",10,"bold"), fg=YELLOW, bg=PANEL)
         loading.pack(anchor="w", padx=20, pady=20)
 
-        def render(records, current_head, error=None):
+        def render(records, current_head, current_fingerprint="", error=None):
             if not self.running or generation != self.page_generation or not list_card.winfo_exists():
                 return
             for widget in list_card.winfo_children():
@@ -2792,7 +2857,7 @@ class SchoolHub:
 
             records = sorted(records, key=lambda r: (0 if r.get("device_id") == self.device_id else 1, str(r.get("name") or "").lower()))
             for index, record in enumerate(records):
-                state = self._effective_device_state(record, current_head)
+                state = self._effective_device_state(record, current_head, current_fingerprint)
                 row = tk.Frame(list_card, bg=PANEL2 if index % 2 == 0 else PANEL)
                 row.pack(fill="x", padx=12, pady=(12 if index == 0 else 0, 0))
                 left = tk.Frame(row, bg=row["bg"])
@@ -2825,12 +2890,29 @@ class SchoolHub:
                     raise WorkspaceError("Configura prima GitHub nelle Impostazioni.")
                 current_head = self._current_remote_data_head()
                 state, local_pending, remote_pending = self._local_device_state()
-                record = self._build_device_record(state, local_pending, remote_pending, current_head)
+                current_fingerprint = str(
+                    getattr(self, "_last_status_remote_fingerprint", "") or ""
+                )
+                if not current_fingerprint:
+                    current_fingerprint = self._remote_content_fingerprint()
+                local_fingerprint = str(
+                    getattr(self, "_last_status_local_fingerprint", "") or ""
+                )
+                record = self._build_device_record(
+                    state,
+                    local_pending,
+                    remote_pending,
+                    current_head,
+                    local_fingerprint,
+                )
                 self._publish_device_record(record)
                 records = self._read_device_records()
-                self.root.after(0, lambda: render(records, current_head))
+                self.root.after(
+                    0,
+                    lambda: render(records, current_head, current_fingerprint),
+                )
             except Exception as exc:
-                self.root.after(0, lambda text=str(exc): render([], "", text))
+                self.root.after(0, lambda text=str(exc): render([], "", "", text))
 
         def refresh_devices():
             if generation != self.page_generation:
@@ -3719,6 +3801,19 @@ class SchoolHub:
         return result
 
     @staticmethod
+    def _tree_fingerprint(files):
+        """One deterministic fingerprint for every nested file path + SHA-256."""
+        h = hashlib.sha256()
+        for path in sorted((files or {}).keys(), key=str.lower):
+            normalized = str(path).replace("\\", "/")
+            digest = str(files[path])
+            h.update(normalized.encode("utf-8", errors="surrogatepass"))
+            h.update(b"\0")
+            h.update(digest.encode("ascii", errors="ignore"))
+            h.update(b"\n")
+        return h.hexdigest()
+
+    @staticmethod
     def _copy_tree(src, dst):
         os.makedirs(dst, exist_ok=True)
         src = os.path.abspath(src)
@@ -4101,11 +4196,29 @@ class SchoolHub:
             self._clone_remote(repo)
             local_files = self._hash_tree(self.workspace.get_unlocked_path())
             remote_files = self._hash_tree(repo)
+            self._last_status_local_fingerprint = self._tree_fingerprint(local_files)
+            self._last_status_remote_fingerprint = self._tree_fingerprint(remote_files)
             state = self._load_sync_state()
             baseline = state.get("files", {}) if state is not None else {}
-            local_only, remote_only, conflicts = self._classify_changes(baseline, local_files, remote_files)
+
+            # Truth comes from the current recursive contents, not an old
+            # baseline or a different Git commit. If trees are identical,
+            # refresh the baseline and report fully synchronized.
+            if local_files == remote_files:
+                self.last_conflicts = []
+                if state is None or baseline != remote_files:
+                    self._save_sync_state(remote_files)
+                return 0, 0, False
+
+            local_only, remote_only, conflicts = self._classify_changes(
+                baseline, local_files, remote_files
+            )
             self.last_conflicts = conflicts[:100]
-            return len(local_only) + len(conflicts), len(remote_only) + len(conflicts), bool(local_only or remote_only or conflicts)
+            return (
+                len(local_only) + len(conflicts),
+                len(remote_only) + len(conflicts),
+                bool(local_only or remote_only or conflicts),
+            )
         except Exception as e:
             return None, None, str(e)
         finally:
@@ -4161,7 +4274,12 @@ class SchoolHub:
             remote_files = self._hash_tree(repo)
 
             baseline = state.get("files", {}) if state is not None else {}
-            local_only, remote_only, conflicts = self._classify_changes(baseline, local_files, remote_files)
+            if local_files == remote_files:
+                local_only, remote_only, conflicts = [], [], []
+            else:
+                local_only, remote_only, conflicts = self._classify_changes(
+                    baseline, local_files, remote_files
+                )
             self.last_conflicts = conflicts[:100]
 
             if conflicts:
