@@ -32,10 +32,10 @@ CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 LOG_FILE = os.path.join(APP_DIR, "schoolhub.log")
 SYNC_STATE_FILE = os.path.join(APP_DIR, "sync_state.json")
 
-APP_VERSION = "2.6.3"
+APP_VERSION = "2.6.4"
 RELEASE_API = "https://api.github.com/repos/MeloniMirko/SchoolHub/releases/latest"
 RELEASES_API = "https://api.github.com/repos/MeloniMirko/SchoolHub/releases?per_page=30"
-UPDATE_USER_AGENT = "SchoolHub-Updater/2.6.3"
+UPDATE_USER_AGENT = "SchoolHub-Updater/2.6.4"
 UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 UPDATE_STAMP_FILE = os.path.join(APP_DIR, "last_update_check.txt")
 GIT_TIMEOUT_SECONDS = 180
@@ -5424,6 +5424,68 @@ def _frozen_self_test(output_path):
         if "Mario Rossi" in redacted or "mario.rossi@example.com" in redacted or "MarioRossi/Scuola" in redacted or fake_token in redacted:
             raise RuntimeError("Redazione diagnostica dati sensibili non valida")
         result["checks"]["diagnostic_redaction"] = True
+
+        nested_files = {
+            "PCTO/Corso Smart Learning/video.mp4": "a" * 64,
+            "Scuola/Informatica/progetto/Main.java": "b" * 64,
+            "Scuola/Inglese/appunti.txt": "c" * 64,
+        }
+        nested_fp = SchoolHub._tree_fingerprint(nested_files)
+        changed_nested = dict(nested_files)
+        changed_nested["Scuola/Informatica/progetto/Main.java"] = "d" * 64
+        changed_fp = SchoolHub._tree_fingerprint(changed_nested)
+        if nested_fp == changed_fp:
+            raise RuntimeError("Fingerprint ricorsiva non rileva un file interno modificato")
+
+        device_probe = object.__new__(SchoolHub)
+        device_probe.branch = "master"
+        same_record = {
+            "state": "updated",
+            "data_branch": "master",
+            "data_head": "old-commit",
+            "data_fingerprint": nested_fp,
+        }
+        same_state = SchoolHub._effective_device_state(
+            device_probe,
+            same_record,
+            "new-commit",
+            nested_fp,
+        )
+        if same_state != "updated":
+            raise RuntimeError(
+                "Un commit GitHub diverso ha generato un falso DEVE SCARICARE "
+                "anche se le cartelle interne sono identiche"
+            )
+
+        legacy_record = {
+            "state": "updated",
+            "data_branch": "master",
+            "data_head": "old-commit",
+        }
+        legacy_state = SchoolHub._effective_device_state(
+            device_probe,
+            legacy_record,
+            "new-commit",
+            changed_fp,
+        )
+        if legacy_state != "updated":
+            raise RuntimeError("Record dispositivo legacy inferisce download solo dal commit")
+
+        changed_record = {
+            "state": "updated",
+            "data_branch": "master",
+            "data_head": "old-commit",
+            "data_fingerprint": nested_fp,
+        }
+        changed_state = SchoolHub._effective_device_state(
+            device_probe,
+            changed_record,
+            "new-commit",
+            changed_fp,
+        )
+        if changed_state != "download":
+            raise RuntimeError("Una differenza reale nei file interni non viene segnalata come download")
+        result["checks"]["device_recursive_content_state"] = True
 
         result["ok"] = True
     except Exception as exc:
