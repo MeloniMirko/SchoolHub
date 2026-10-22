@@ -16,9 +16,10 @@ import uuid
 import zipfile
 import platform
 import re
+import traceback
 from datetime import datetime, timezone
 
-from workspace import WorkspaceManager, WorkspaceError
+from workspace import WorkspaceManager, WorkspaceError, retry_sharing_violation
 
 
 # ============================================================
@@ -196,12 +197,18 @@ def load_config():
 def save_config(config):
     os.makedirs(APP_DIR, exist_ok=True)
 
-    temp_file = CONFIG_FILE + ".tmp"
-
-    with open(temp_file, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=4)
-
-    os.replace(temp_file, CONFIG_FILE)
+    temp_file = CONFIG_FILE + ".tmp-" + uuid.uuid4().hex
+    try:
+        with open(temp_file, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=4)
+            f.flush()
+            os.fsync(f.fileno())
+        retry_sharing_violation(lambda: os.replace(temp_file, CONFIG_FILE))
+    finally:
+        try:
+            os.unlink(temp_file)
+        except FileNotFoundError:
+            pass
 
 
 
@@ -3791,12 +3798,18 @@ class SchoolHub:
                 if rel == ".gitattributes":
                     continue
                 h = hashlib.sha256()
-                with open(path, "rb") as fh:
-                    while True:
-                        chunk = fh.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        h.update(chunk)
+                try:
+                    with open(path, "rb") as fh:
+                        while True:
+                            chunk = fh.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            h.update(chunk)
+                except OSError as exc:
+                    raise WorkspaceError(
+                        f"Impossibile leggere '{rel}' durante la sincronizzazione: {exc}. "
+                        "Chiudi il programma che lo sta utilizzando e riprova."
+                    ) from exc
                 result[rel] = h.hexdigest()
         return result
 
@@ -3830,7 +3843,15 @@ class SchoolHub:
                     continue
                 if os.path.islink(source_file):
                     raise WorkspaceError(f"Collegamento simbolico non supportato: {source_file}")
-                shutil.copy2(source_file, os.path.join(target_dir, name))
+                try:
+                    retry_sharing_violation(
+                        lambda: shutil.copy2(source_file, os.path.join(target_dir, name))
+                    )
+                except OSError as exc:
+                    raise WorkspaceError(
+                        f"Impossibile copiare '{rel_file}' nello snapshot: {exc}. "
+                        "Verifica i permessi e chiudi l'eventuale programma che lo sta usando."
+                    ) from exc
 
     @staticmethod
     def _replace_tree(src, dst):
@@ -3861,10 +3882,18 @@ class SchoolHub:
 
     def _save_sync_state(self, files):
         os.makedirs(os.path.dirname(self.sync_state_file), exist_ok=True)
-        tmp = self.sync_state_file + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump({"version": 1, "files": files}, fh, indent=2, sort_keys=True)
-        os.replace(tmp, self.sync_state_file)
+        tmp = self.sync_state_file + ".tmp-" + uuid.uuid4().hex
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump({"version": 1, "files": files}, fh, indent=2, sort_keys=True)
+                fh.flush()
+                os.fsync(fh.fileno())
+            retry_sharing_violation(lambda: os.replace(tmp, self.sync_state_file))
+        finally:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
 
     def _git_remote_for_auth(self):
         """Use only an explicitly selected account, never infer one from repo ownership."""
@@ -4347,6 +4376,9 @@ class SchoolHub:
         except Exception as e:
             code = self._error_code("sync", e)
             self.write_log(f"✕ [{code}] ERRORE SYNC: {e}")
+            self.write_log("Dettaglio tecnico sync:\n" + "".join(
+                traceback.format_exception(type(e), e, e.__traceback__)
+            ))
             self.progress_update(100, "Errore", f"[{code}] {e}")
             if self.last_conflicts: self.finish_status("CONFLITTO", RED, f"[{code}] {e}")
             else: self.finish_status("ERRORE", RED, f"[{code}] {e}")
@@ -4371,6 +4403,10 @@ class SchoolHub:
             local, remote, changes = self.get_status()
 
             if local is None:
+                if self.running:
+                    self.root.after(0, lambda detail=str(changes): self.set_status(
+                        "VERIFICA NON DISPONIBILE", RED, detail[:170]
+                    ))
                 return
 
             if not self.running:
@@ -4702,6 +4738,10 @@ class SchoolHub:
             return "SH-SYNC-301"
         if "in uso" in text or "being used" in text or "winerror 32" in text:
             return "SH-SYNC-302"
+        if (isinstance(exc, PermissionError) or "permission denied" in text
+                or "access is denied" in text or "accesso negato" in text
+                or "winerror 5" in text):
+            return "SH-SYNC-303"
         if "cifr" in text or "vault" in text or "shenc" in text:
             return "SH-VLT-201"
         if "path" in text or "percorso" in text or "filename" in text:
