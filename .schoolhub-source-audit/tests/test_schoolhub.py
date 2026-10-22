@@ -248,6 +248,47 @@ class SyncTests(unittest.TestCase):
         self.assertEqual((self.wp/'same.txt').read_text(),'REMOTE2')
         self.assertEqual(read_remote_file(self.remote,'same.txt'),'REMOTE2')
 
+    def test_individual_conflict_choices_preserve_both_versions(self):
+        git_seed_remote(self.remote, {'a.txt':'BASE-A', 'b.txt':'BASE-B'})
+        self.wm.unlock(PASSWORD)
+        self.app.sync_worker(None)
+        (self.wp/'a.txt').write_text('LOCAL-A', encoding='utf-8')
+        (self.wp/'b.txt').write_text('LOCAL-B', encoding='utf-8')
+        git_remote_change(self.remote, 'a.txt', 'REMOTE-A')
+        git_remote_change(self.remote, 'b.txt', 'REMOTE-B')
+        self.app.sync_worker(None)
+        self.assertEqual(self.app.last_conflicts, ['a.txt', 'b.txt'])
+
+        self.app.sync_running = True
+        self.app._resolve_conflict_worker(
+            'mixed', None, {'a.txt': 'local', 'b.txt': 'remote'}
+        )
+        self.assertEqual((self.wp/'a.txt').read_text(), 'LOCAL-A')
+        self.assertEqual((self.wp/'b.txt').read_text(), 'REMOTE-B')
+        self.assertEqual(read_remote_file(self.remote, 'a.txt'), 'LOCAL-A')
+        self.assertEqual(read_remote_file(self.remote, 'b.txt'), 'REMOTE-B')
+        self.assertEqual(self.app.last_conflicts, [])
+
+    def test_incomplete_conflict_choices_never_overwrite(self):
+        git_seed_remote(self.remote, {'a.txt':'BASE-A', 'b.txt':'BASE-B'})
+        self.wm.unlock(PASSWORD)
+        self.app.sync_worker(None)
+        (self.wp/'a.txt').write_text('LOCAL-A', encoding='utf-8')
+        (self.wp/'b.txt').write_text('LOCAL-B', encoding='utf-8')
+        git_remote_change(self.remote, 'a.txt', 'REMOTE-A')
+        git_remote_change(self.remote, 'b.txt', 'REMOTE-B')
+        before = self.state.read_bytes()
+        statuses = []
+        self.app.finish_status = lambda *args: statuses.append(args)
+        self.app.sync_running = True
+        self.app._resolve_conflict_worker('mixed', None, {'a.txt':'local'})
+        self.assertEqual((self.wp/'a.txt').read_text(), 'LOCAL-A')
+        self.assertEqual((self.wp/'b.txt').read_text(), 'LOCAL-B')
+        self.assertEqual(read_remote_file(self.remote, 'a.txt'), 'REMOTE-A')
+        self.assertEqual(read_remote_file(self.remote, 'b.txt'), 'REMOTE-B')
+        self.assertEqual(self.state.read_bytes(), before)
+        self.assertTrue(any(item[0] == 'ERRORE' for item in statuses))
+
     def test_empty_remote_local_first_push(self):
         # Recreate Vault with a local file before first sync.
         self.wm.unlock(PASSWORD)
@@ -301,6 +342,38 @@ class SyncTests(unittest.TestCase):
         # Next clean sync should upload the preserved edit.
         self.app.sync_worker(None)
         self.assertEqual(read_remote_file(self.remote,'base.txt'),'EDIT-WHILE-SYNCING')
+
+class FileLockSafetyTests(unittest.TestCase):
+    def test_transient_permission_failure_retries_then_succeeds(self):
+        action = mock.Mock(side_effect=[
+            PermissionError(13, 'Permission denied'), 'DONE'
+        ])
+        with mock.patch.object(workspace_mod.time, 'sleep') as sleep:
+            result = workspace_mod.retry_sharing_violation(action)
+        self.assertEqual(result, 'DONE')
+        self.assertEqual(action.call_count, 2)
+        sleep.assert_called_once()
+
+    def test_permanent_permission_failure_preserves_exception(self):
+        action = mock.Mock(side_effect=PermissionError(13, 'Permission denied'))
+        with mock.patch.object(workspace_mod.time, 'sleep'):
+            with self.assertRaises(PermissionError):
+                workspace_mod.retry_sharing_violation(action, attempts=3)
+        self.assertEqual(action.call_count, 3)
+
+    def test_sync_hash_reports_filename_on_permission_denied(self):
+        with tempfile.TemporaryDirectory(prefix='schoolhub-locked-') as directory:
+            target = Path(directory) / 'locked.txt'
+            target.write_text('untouched', encoding='utf-8')
+            with mock.patch('builtins.open', side_effect=PermissionError(13, 'Permission denied')):
+                with self.assertRaisesRegex(WorkspaceError, 'locked.txt'):
+                    SchoolHub._hash_tree(directory)
+            self.assertEqual(target.read_text(encoding='utf-8'), 'untouched')
+
+    def test_error_codes_distinguish_permissions_and_conflicts(self):
+        self.assertEqual(SchoolHub._error_code('sync', PermissionError(13, 'Permission denied')), 'SH-SYNC-303')
+        self.assertEqual(SchoolHub._error_code('sync', WorkspaceError('conflitto su 2 file')), 'SH-SYNC-301')
+
 
 class MigrationTests(unittest.TestCase):
     def test_old_workspace_and_vault_are_migrated_to_scoula_paths(self):
