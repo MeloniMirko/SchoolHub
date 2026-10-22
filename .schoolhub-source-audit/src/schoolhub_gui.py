@@ -127,20 +127,20 @@ def bundled_git_info():
 # COLORS
 # ============================================================
 
-BG = "#070b12"
-PANEL = "#0d1520"
-PANEL2 = "#121d2a"
-PANEL3 = "#182536"
-BORDER = "#26384e"
+BG = "#080f1d"
+PANEL = "#111d30"
+PANEL2 = "#192940"
+PANEL3 = "#213654"
+BORDER = "#2c415b"
 
-TEXT = "#f4f7fb"
-MUTED = "#91a0b5"
+TEXT = "#f0f7ff"
+MUTED = "#a6b7ce"
 
-GREEN = "#22c55e"
-YELLOW = "#fbbf24"
-RED = "#fb7185"
-BLUE = "#2f81f7"
-CYAN = "#38bdf8"
+GREEN = "#36d49c"
+YELLOW = "#ffc86e"
+RED = "#ff748c"
+BLUE = "#287bff"
+CYAN = "#66d7ff"
 
 
 # ============================================================
@@ -1394,6 +1394,18 @@ class SchoolHub:
     def show_home(self):
 
         self.clear_content()
+
+        hero = tk.Frame(self.content, bg=BG)
+        hero.pack(fill="x", pady=(0, 18))
+        tk.Label(
+            hero, text="IL TUO SPAZIO, OVUNQUE.",
+            font=("Segoe UI", 11, "bold"), fg=CYAN, bg=BG
+        ).pack(anchor="w", pady=(2, 5))
+        tk.Label(
+            hero, text="File protetti. Dispositivi collegati. Tutto sotto controllo.",
+            font=("Segoe UI", 10), fg=MUTED, bg=BG,
+            anchor="w", justify="left", wraplength=690
+        ).pack(anchor="w")
 
         status = tk.Frame(
             self.content,
@@ -5688,30 +5700,56 @@ def _startup_probe(root, stage):
 
 
 def show_startup_intro(root):
-    """A real animated first frame, also when the bootloader splash is unavailable."""
+    """Animated, branded startup window even without PyInstaller's splash."""
     import math
     root.withdraw()
-    root.configure(bg="#081120")
+    root.configure(bg="#08101e")
     root.overrideredirect(True)
     root.attributes("-topmost", True)
     width, height = 680, 410
     x = (root.winfo_screenwidth() - width) // 2
     y = (root.winfo_screenheight() - height) // 2
     root.geometry(f"{width}x{height}+{x}+{y}")
-    canvas = tk.Canvas(root, width=width, height=height, bg="#081120",
+    canvas = tk.Canvas(root, width=width, height=height, bg="#08101e",
                        highlightthickness=0, borderwidth=0)
     canvas.pack(fill="both", expand=True)
-    canvas.create_rectangle(8, 8, 671, 401, fill="#0a182c", outline="#237cff", width=2)
-    canvas.create_text(340, 112, text="SH", fill="#49bdff", font=("Segoe UI", 62, "bold"))
-    canvas.create_text(340, 220, text="SchoolHub", fill="#f4f8ff", font=("Segoe UI", 32, "bold"))
-    canvas.create_text(340, 270, text="Il tuo spazio. Sempre con te.", fill="#a1bcdc", font=("Segoe UI", 14))
-    canvas.create_rectangle(35, 327, 645, 357, fill="#112743", outline="")
-    bar = canvas.create_rectangle(36, 328, 156, 356, fill="#1479ff", outline="")
-    canvas.create_text(340, 383, text=f"Avvio di SchoolHub {APP_VERSION}", fill="#7797bc", font=("Segoe UI", 10))
+
+    canvas.create_rectangle(8, 8, 672, 402, fill="#101e34",
+                            outline="#2b5280", width=2)
+    canvas.create_line(28, 28, 652, 28, fill="#234a78", width=2)
+    canvas.create_arc(228, 13, 452, 237, start=0, extent=76,
+                      style=tk.ARC, outline="#47caff", width=3, tags="arc_main")
+    canvas.create_arc(240, 25, 440, 225, start=180, extent=86,
+                      style=tk.ARC, outline="#295785", width=2, tags="arc_sub")
+    dots = [
+        canvas.create_oval(0, 0, 10, 10, fill=color, outline="")
+        for color in ("#9ae7ff", "#5fcaff", "#2f81f7")
+    ]
+    icon_path = resource_path("schoolhub_icon.png")
+    if icon_path:
+        try:
+            raw_icon = tk.PhotoImage(file=icon_path)
+            scale = max(1, (max(raw_icon.width(), raw_icon.height()) + 143) // 144)
+            canvas._boot_logo = raw_icon.subsample(scale, scale)
+            canvas.create_image(340, 125, image=canvas._boot_logo)
+        except (tk.TclError, OSError):
+            canvas.create_text(340, 125, text="SH", fill="#66d7ff",
+                               font=("Segoe UI", 51, "bold"))
+    else:
+        canvas.create_text(340, 125, text="SH", fill="#66d7ff",
+                           font=("Segoe UI", 51, "bold"))
+    canvas.create_text(340, 250, text="SchoolHub", fill="#f0f7ff",
+                       font=("Segoe UI", 32, "bold"))
+    canvas.create_text(340, 289, text="IL TUO SPAZIO. OVUNQUE.",
+                       fill="#9fb9d8", font=("Segoe UI", 11, "bold"))
+    canvas.create_rectangle(36, 327, 644, 357, fill="#132941", outline="#28517e")
+    bar = canvas.create_rectangle(38, 330, 154, 354, fill="#287bff", outline="")
+    canvas.create_text(340, 384, text="PREPARAZIONE AMBIENTE SICURO",
+                       fill="#a3b8ce", font=("Segoe UI", 9, "bold"))
+
     root.update_idletasks()
     root.deiconify()
     root.update()
-    # Keep the boot intro until the application's own intro has actually painted.
     try:
         import pyi_splash
         if pyi_splash.is_alive():
@@ -5721,12 +5759,25 @@ def show_startup_intro(root):
     _startup_probe(root, "intro")
     started = time.monotonic()
     done = tk.BooleanVar(root, False)
-    duration = 3.0 if len(sys.argv) > 1 and sys.argv[1] == "--startup-visual-test" else 1.2
+    duration = 3.0 if len(sys.argv) > 1 and sys.argv[1] == "--startup-visual-test" else 1.35
 
     def animate():
+        if not canvas.winfo_exists():
+            done.set(True)
+            return
         elapsed = time.monotonic() - started
-        left = 36 + 244 * (1 - math.cos(elapsed * 3.0))
-        canvas.coords(bar, left, 328, left + 120, 356)
+        phase = (elapsed * 115) % 360
+        canvas.itemconfigure("arc_main", start=phase + 8)
+        canvas.itemconfigure("arc_sub", start=192 - phase * 0.75)
+        for index, particle in enumerate(dots):
+            theta = math.radians(phase + 120 * index)
+            px = 340 + 108 * math.cos(theta)
+            py = 125 + 108 * math.sin(theta)
+            radius = 5.5 - index * 0.8
+            canvas.coords(particle, px-radius, py-radius, px+radius, py+radius)
+        sweep = (1.0 - math.cos(math.radians(phase))) / 2.0
+        left = 38 + 489 * sweep
+        canvas.coords(bar, left, 330, left + 116, 354)
         if elapsed >= duration:
             done.set(True)
         else:
