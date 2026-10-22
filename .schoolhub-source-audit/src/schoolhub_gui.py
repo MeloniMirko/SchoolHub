@@ -33,10 +33,10 @@ CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 LOG_FILE = os.path.join(APP_DIR, "schoolhub.log")
 SYNC_STATE_FILE = os.path.join(APP_DIR, "sync_state.json")
 
-APP_VERSION = "2.6.4"
+APP_VERSION = "2.6.5"
 RELEASE_API = "https://api.github.com/repos/MeloniMirko/SchoolHub/releases/latest"
 RELEASES_API = "https://api.github.com/repos/MeloniMirko/SchoolHub/releases?per_page=30"
-UPDATE_USER_AGENT = "SchoolHub-Updater/2.6.4"
+UPDATE_USER_AGENT = "SchoolHub-Updater/2.6.5"
 UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 UPDATE_STAMP_FILE = os.path.join(APP_DIR, "last_update_check.txt")
 GIT_TIMEOUT_SECONDS = 180
