@@ -2521,18 +2521,23 @@ class SchoolHub:
                         )
                         return
 
-                    if local > 0 and remote > 0:
+                    if self.last_conflicts:
                         status_label.configure(text="⚠ CONFLITTO RILEVATO", fg=RED)
                         detail_label.configure(
                             text=(
                                 f"Workspace: {local} file cambiati · GitHub: {remote} file cambiati.\n"
                                 f"I file sotto sono quelli che sono stati modificati da entrambe le parti.\n"
-                                "Solo questi sono veri conflitti. Scegli quale versione mantenere per TUTTI i file elencati."
+                                "Solo questi sono veri conflitti. Scegli una versione per ciascun file."
                             )
                         )
                         shown_conflicts[:] = list(self.last_conflicts)
                         resolution_choices.clear()
                         render_conflict_choices()
+                    elif local > 0 and remote > 0:
+                        status_label.configure(text="MODIFICHE INDIPENDENTI", fg=CYAN)
+                        detail_label.configure(
+                            text=f"{local} modifiche locali e {remote} modifiche GitHub su file diversi. Nessun conflitto: usa Sincronizza."
+                        )
                     elif local > 0:
                         status_label.configure(text="MODIFICHE SOLO LOCALI", fg=YELLOW)
                         detail_label.configure(
@@ -4629,12 +4634,20 @@ class SchoolHub:
                 f"{remote} file da GitHub"
             )
 
-        else:
+        elif self.last_conflicts:
 
             self.set_status(
                 "CONFLITTO",
                 RED,
-                "Locale e GitHub divergenti"
+                f"{len(self.last_conflicts)} file in conflitto"
+            )
+
+        else:
+
+            self.set_status(
+                "DA SINCRONIZZARE",
+                YELLOW,
+                f"{local} modifiche locali · {remote} modifiche GitHub"
             )
 
     # ========================================================
