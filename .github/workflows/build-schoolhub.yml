@@ -8,6 +8,12 @@ on:
       - ".github/workflows/build-schoolhub.yml"
       - ".schoolhub-v2.2/**"
       - ".schoolhub-source-audit/**"
+  pull_request:
+    branches:
+      - schoolhub-build
+    paths:
+      - ".github/workflows/build-schoolhub.yml"
+      - ".schoolhub-source-audit/**"
   workflow_dispatch:
 
 permissions:
@@ -35,7 +41,7 @@ jobs:
           if ($actual -ne "11a25bb9e4b54868a2754b15d3c665b5384fb24cc06946a3fb0f29af6f135ba8") { throw "Source hash mismatch" }
           tar -xf "source.tar.xz"
 
-      - name: Apply SchoolHub 2.6.4 Recursive Sync State + Responsive source
+      - name: Apply SchoolHub 2.6.5 Recursive Sync State + Responsive source
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -74,19 +80,31 @@ jobs:
           spec_path = root / 'SchoolHub.spec'
 
           gui = gui_path.read_text(encoding='utf-8')
-          if 'APP_VERSION = "2.6.4"' not in gui:
-              raise SystemExit('APP_VERSION 2.6.4 marker not found')
+          if 'APP_VERSION = "2.6.5"' not in gui:
+              raise SystemExit('APP_VERSION 2.6.5 marker not found')
 
-          (root / 'VERSION.txt').write_text('2.6.4\n', encoding='utf-8')
+          (root / 'VERSION.txt').write_text('2.6.5\n', encoding='utf-8')
 
           logo = Image.open(root / 'schoolhub_icon.png').convert('RGBA')
-          canvas = Image.new('RGBA', (680, 410), (8, 17, 32, 255))
+          canvas = Image.new('RGBA', (680, 410), (8, 16, 30, 255))
           draw = ImageDraw.Draw(canvas)
-          draw.rounded_rectangle((8, 8, 671, 401), radius=34, fill=(10, 24, 44, 255), outline=(35, 124, 255, 255), width=2)
-          draw.rounded_rectangle((34, 326, 646, 358), radius=16, fill=(17, 39, 67, 255), outline=(43, 103, 177, 255), width=1)
+          # Muted vertical blue gradient with layered depth: static artwork under a live animation.
+          for y in range(410):
+              t = y / 409.0
+              color = (int(8 + 8*t), int(16 + 14*t), int(31 + 24*t), 255)
+              draw.line((0, y, 679, y), fill=color)
+          draw.rounded_rectangle((8, 8, 671, 401), radius=30,
+                                 fill=(14, 27, 47, 255),
+                                 outline=(38, 78, 121, 255), width=2)
+          draw.line((28, 28, 652, 28), fill=(34, 76, 121, 255), width=2)
+          draw.ellipse((227, 12, 453, 238), outline=(27, 65, 105, 255), width=2)
+          draw.ellipse((239, 24, 441, 226), outline=(19, 51, 84, 255), width=1)
+          draw.rounded_rectangle((35, 327, 645, 357), radius=15,
+                                 fill=(18, 39, 65, 255),
+                                 outline=(40, 77, 121, 255), width=1)
 
-          logo.thumbnail((185, 185), Image.Resampling.LANCZOS)
-          canvas.alpha_composite(logo, ((680-logo.width)//2, 38))
+          logo.thumbnail((136, 136), Image.Resampling.LANCZOS)
+          canvas.alpha_composite(logo, ((680-logo.width)//2, 125-logo.height//2))
 
           def font(size, bold=False):
               candidates = [
@@ -101,15 +119,16 @@ jobs:
               return ImageFont.load_default()
 
           title_font = font(36, True)
-          sub_font = font(16, False)
-          small_font = font(12, False)
-          title = 'SchoolHub'
-          box = draw.textbbox((0, 0), title, font=title_font)
-          draw.text(((680-(box[2]-box[0]))/2, 225), title, fill=(244, 248, 255, 255), font=title_font)
-          subtitle = 'UltraLight · ambiente sicuro'
-          box = draw.textbbox((0, 0), subtitle, font=sub_font)
-          draw.text(((680-(box[2]-box[0]))/2, 276), subtitle, fill=(161, 188, 220, 255), font=sub_font)
-          draw.text((34, 374), 'SchoolHub 2.6.4 - Avvio applicazione', fill=(119, 151, 188, 255), font=small_font)
+          sub_font = font(13, True)
+          small_font = font(11, True)
+          def centered(y, value, font_object, color):
+              bounds = draw.textbbox((0, 0), value, font=font_object)
+              draw.text(((680 - (bounds[2]-bounds[0])) / 2, y),
+                        value, fill=color, font=font_object)
+
+          centered(226, 'SchoolHub', title_font, (242, 249, 255, 255))
+          centered(281, 'IL TUO SPAZIO. OVUNQUE.', sub_font, (158, 186, 216, 255))
+          centered(374, 'PREPARAZIONE AMBIENTE SICURO', small_font, (153, 180, 209, 255))
           canvas.convert('RGB').save(root / 'schoolhub_splash.png', 'PNG')
 
           spec = spec_path.read_text(encoding='utf-8')
@@ -209,7 +228,7 @@ jobs:
               'safe default remote': 'DEFAULT_REMOTE = ""' in gui,
               'auto sync default off': '"auto_sync": False' in gui,
               'auto start default off': '"auto_start": False' in gui,
-              'version 2.6.4': 'APP_VERSION = "2.6.4"' in gui,
+              'version 2.6.5': 'APP_VERSION = "2.6.5"' in gui,
               'daily update cache': 'UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60' in gui,
               'minute clock': 'after(60000, self.update_clock)' in gui,
               'single instance': 'def _acquire_single_instance()' in gui,
@@ -253,7 +272,7 @@ jobs:
               'diagnostic export': 'def export_diagnostics' in gui and 'schoolhub-sanitized.log' in gui and '_redact_diagnostic_text' in gui,
               'safe repair': 'def repair_schoolhub' in gui and 'NON verranno eliminati' in gui,
               'support error codes': 'SH-GIT-101' in gui and 'SH-SYNC-302' in gui and 'SH-UPD-401' in gui,
-              'windows file metadata': 'version="version_info.txt"' in spec and "ProductVersion', u'2.6.4'" in version_info,
+              'windows file metadata': 'version="version_info.txt"' in spec and "ProductVersion', u'2.6.5'" in version_info,
               'safe uninstall': 'CurUninstallStepChanged' in installer and 'MB_DEFBUTTON2' in installer,
               'nondefault branch fetch': 'fetch_ref = f"refs/heads/{requested}:refs/remotes/origin/{requested}"' in gui and '["fetch", "--depth", "1", "origin", fetch_ref]' in gui,
               'branch error lists remotes': '"ls-remote", "--heads", remote' in gui,
@@ -338,7 +357,7 @@ jobs:
           if ($size -gt 160MB) { throw "UltraLight size budget exceeded: $mb MB" }
           $vi = (Get-Item ".\dist\SchoolHub.exe").VersionInfo
           Write-Host "EXE ProductVersion: $($vi.ProductVersion) Company: $($vi.CompanyName)"
-          if ($vi.ProductVersion -notlike "2.6.4*") { throw "EXE ProductVersion metadata missing" }
+          if ($vi.ProductVersion -notlike "2.6.5*") { throw "EXE ProductVersion metadata missing" }
           if ($vi.CompanyName -ne "SchoolHub") { throw "EXE CompanyName metadata missing" }
 
       - name: Self-test EXE
@@ -372,7 +391,7 @@ jobs:
           if (-not $result.checks.responsive_ui_core) { throw "Responsive UI core test failed" }
           if (-not $result.checks.device_recursive_content_state) { throw "Recursive device content state test failed" }
           if (-not $result.checks.safe_default_remote) { throw "Privacy remote failed" }
-          if ($result.checks.version -ne "2.6.4") { throw "Wrong version" }
+          if ($result.checks.version -ne "2.6.5") { throw "Wrong version" }
 
       - name: Frozen independent restart regression
         shell: pwsh
@@ -461,7 +480,7 @@ jobs:
           Write-Host "Installer size: $([math]::Round((Get-Item '.\dist\SchoolHub-Setup.exe').Length / 1MB, 1)) MB"
           $setupVi = (Get-Item ".\dist\SchoolHub-Setup.exe").VersionInfo
           Write-Host "Setup ProductVersion: $($setupVi.ProductVersion) Company: $($setupVi.CompanyName)"
-          if ($setupVi.ProductVersion -notlike "2.6.4*") { throw "Setup ProductVersion metadata missing" }
+          if ($setupVi.ProductVersion -notlike "2.6.5*") { throw "Setup ProductVersion metadata missing" }
           if ($setupVi.CompanyName.Trim() -ne "SchoolHub") { throw "Setup CompanyName metadata missing" }
 
       - name: Checksum
@@ -477,7 +496,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SchoolHub-Windows-v2.6.4-Responsive
+          name: SchoolHub-Windows-v2.6.5-Responsive
           path: |
             dist/SchoolHub.exe
             dist/SchoolHub.exe.sha256.txt
@@ -491,15 +510,16 @@ jobs:
           retention-days: 30
 
       - name: Publish release
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/schoolhub-build'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "schoolhub-v2.6.4"
-          $notes = "SchoolHub 2.6.4: corregge i falsi DEVE SCARICARE tra dispositivi usando la fingerprint SHA-256 ricorsiva reale di file e sottocartelle invece del solo commit GitHub; se Workspace e GitHub sono byte-per-byte identici SchoolHub forza AGGIORNATO e riallinea la baseline. Mantiene il fix branch non predefinito master/main, UI responsive/scrollabile, intro animata, updater Setup, Git LFS e tutte le correzioni precedenti."
+          $tag = "schoolhub-v2.6.5"
+          $notes = "SchoolHub 2.6.5: nuova animazione di avvio con orbite dinamiche, interfaccia raffinata, scelta esplicita per ogni file in conflitto, diagnostica avanzata per Access Denied, scritture atomiche uniche e retry temporanei per file bloccati. Include tutte le funzionalita e le protezioni della 2.6.4."
           if (gh release view $tag --repo "$env:GITHUB_REPOSITORY" *> $null) {
             gh release upload $tag ".\dist\SchoolHub.exe#SchoolHub.exe" ".\dist\SchoolHub.exe.sha256.txt#SchoolHub.exe.sha256.txt" ".\dist\SchoolHub-Setup.exe#SchoolHub-Setup.exe" ".\dist\SchoolHub-Setup.exe.sha256.txt#SchoolHub-Setup.exe.sha256.txt" --clobber --repo "$env:GITHUB_REPOSITORY"
-            gh release edit $tag --title "SchoolHub 2.6.4 Recursive Sync State + Responsive" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
+            gh release edit $tag --title "SchoolHub 2.6.5 Recursive Sync State + Responsive" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
           } else {
-            gh release create $tag ".\dist\SchoolHub.exe#SchoolHub.exe" ".\dist\SchoolHub.exe.sha256.txt#SchoolHub.exe.sha256.txt" ".\dist\SchoolHub-Setup.exe#SchoolHub-Setup.exe" ".\dist\SchoolHub-Setup.exe.sha256.txt#SchoolHub-Setup.exe.sha256.txt" --target "$env:GITHUB_SHA" --title "SchoolHub 2.6.4 Recursive Sync State + Responsive" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
+            gh release create $tag ".\dist\SchoolHub.exe#SchoolHub.exe" ".\dist\SchoolHub.exe.sha256.txt#SchoolHub.exe.sha256.txt" ".\dist\SchoolHub-Setup.exe#SchoolHub-Setup.exe" ".\dist\SchoolHub-Setup.exe.sha256.txt#SchoolHub-Setup.exe.sha256.txt" --target "$env:GITHUB_SHA" --title "SchoolHub 2.6.5 Recursive Sync State + Responsive" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
           }
