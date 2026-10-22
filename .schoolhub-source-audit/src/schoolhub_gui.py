@@ -2204,10 +2204,11 @@ class SchoolHub:
         except Exception as e:
             messagebox.showerror("Workspace", f"Impossibile aprire il Workspace:\n{e}")
 
-    def _resolve_conflict(self, choice):
-        """Resolve all currently conflicting files in one explicit operation.
-        choice='local' keeps the encrypted Workspace version.
-        choice='remote' keeps the GitHub version.
+    def _resolve_conflict(self, choice, choices=None):
+        """Resolve conflicts only after the user confirms the selected versions.
+
+        Mixed mode requires a local/remote choice for every conflicting path.
+        The worker validates the live conflict set again before writing anything.
         """
         if not self.git_enabled:
             return
@@ -2235,12 +2236,27 @@ class SchoolHub:
                 "I file in conflitto su GitHub verranno sostituiti "
                 "dalla copia locale e verrà creato un nuovo commit."
             )
-        else:
+        elif choice == "remote":
             question = (
                 "Vuoi usare GitHub come versione definitiva?\n\n"
                 "I file in conflitto locali verranno sostituiti "
                 "dalla copia presente su GitHub."
             )
+        elif choice == "mixed":
+            if not isinstance(choices, dict) or not choices or any(
+                value not in ("local", "remote") for value in choices.values()
+            ):
+                messagebox.showwarning("Conflitti", "Scegli una versione per ogni file prima di continuare.", parent=self.root)
+                return
+            n_local = sum(v == "local" for v in choices.values())
+            n_remote = sum(v == "remote" for v in choices.values())
+            question = (
+                f"Confermi le scelte per {len(choices)} file?\n\n"
+                f"Workspace: {n_local}\nGitHub: {n_remote}\n\n"
+                "SchoolHub ricontrollerà che nessun file sia cambiato prima di applicarle."
+            )
+        else:
+            raise ValueError("Scelta di risoluzione non valida.")
 
         if not messagebox.askyesno("Risolvi conflitti", question, parent=self.root):
             return
@@ -2249,11 +2265,11 @@ class SchoolHub:
         self.set_status("RISOLUZIONE CONFLITTI...", YELLOW, "Operazione esplicita richiesta")
         threading.Thread(
             target=self._resolve_conflict_worker,
-            args=(choice, password),
+            args=(choice, password, choices),
             daemon=True
         ).start()
 
-    def _resolve_conflict_worker(self, choice, password):
+    def _resolve_conflict_worker(self, choice, password, choices=None):
         temp_root = tempfile.mkdtemp(prefix="schoolhub-conflict-")
         repo = os.path.join(temp_root, "repo")
         try:
@@ -2271,11 +2287,23 @@ class SchoolHub:
                 self.last_conflicts = []
                 raise WorkspaceError("Non risultano più conflitti. Aggiorna lo stato e sincronizza normalmente.")
 
-            # Start from GitHub. Preserve independent local changes, and apply the
-            # conflicting local paths only when the user explicitly chose Workspace.
+            if choice == "mixed":
+                if (not isinstance(choices, dict)
+                        or set(choices) != set(conflicts)
+                        or any(v not in ("local", "remote") for v in choices.values())):
+                    raise WorkspaceError(
+                        "L'elenco dei conflitti è cambiato o contiene scelte incomplete. "
+                        "Riapri Conflitti e scegli nuovamente la versione di ogni file."
+                    )
+            elif choice not in ("local", "remote"):
+                raise WorkspaceError("Scelta di risoluzione non valida.")
+
+            # Preserve all independent changes and apply only explicitly chosen paths.
             paths_to_take_local = set(local_only)
             if choice == "local":
                 paths_to_take_local.update(conflicts)
+            elif choice == "mixed":
+                paths_to_take_local.update(p for p in conflicts if choices[p] == "local")
 
             if self.workspace.is_unlocked and self._hash_tree(self.workspace.get_unlocked_path()) != local_files:
                 raise WorkspaceError(
@@ -2288,6 +2316,8 @@ class SchoolHub:
             paths_from_remote = set(remote_only)
             if choice == "remote":
                 paths_from_remote.update(conflicts)
+            elif choice == "mixed":
+                paths_from_remote.update(p for p in conflicts if choices[p] == "remote")
             self._persist_sync_tree(repo, password, temp_root, paths_from_remote)
 
             self._ensure_git_identity(repo)
@@ -2307,9 +2337,12 @@ class SchoolHub:
             if choice == "local":
                 self.write_log(f"✓ Conflitti risolti: mantenuto Workspace per {len(conflicts)} file.")
                 self.finish_status("SINCRONIZZATO", GREEN, "Conflitti risolti: mantenuto Workspace")
-            else:
+            elif choice == "remote":
                 self.write_log(f"✓ Conflitti risolti: mantenuto GitHub per {len(conflicts)} file.")
                 self.finish_status("SINCRONIZZATO", GREEN, "Conflitti risolti: mantenuto GitHub")
+            else:
+                self.write_log(f"✓ Conflitti risolti individualmente: {len(conflicts)} file.")
+                self.finish_status("SINCRONIZZATO", GREEN, "Scelte individuali applicate")
         except Exception as e:
             code = self._error_code("sync", e)
             self.write_log(f"✕ [{code}] Risoluzione conflitti fallita: {e}")
@@ -2361,40 +2394,103 @@ class SchoolHub:
         )
         conflict_list.pack(fill="x", padx=22, pady=(0, 22))
 
+        # Keep choices attached to paths, not list indices. No automatic overwrite.
+        resolution_choices = {}
+        shown_conflicts = []
+
+        choice_hint = tk.Label(
+            self.content,
+            text="Seleziona un file e indica quale versione conservare. Nessuna scelta predefinita.",
+            font=("Segoe UI", 9), fg=MUTED, bg=BG,
+            wraplength=640, justify="left"
+        )
+        choice_hint.pack(anchor="w", pady=(0, 8))
+
+        def render_conflict_choices():
+            selected = conflict_list.curselection()
+            conflict_list.delete(0, tk.END)
+            for path in shown_conflicts:
+                decision = resolution_choices.get(path)
+                label = ("✓  WORKSPACE" if decision == "local" else
+                         "✓  GITHUB   " if decision == "remote" else
+                         "·  DA DECIDERE")
+                conflict_list.insert(tk.END, f"{label}    {path}")
+            conflict_list.configure(height=min(12, max(3, len(shown_conflicts))))
+            for index in selected:
+                if index < len(shown_conflicts):
+                    conflict_list.selection_set(index)
+            pending = sum(p not in resolution_choices for p in shown_conflicts)
+            choice_hint.configure(text=(
+                f"File in conflitto: {len(shown_conflicts)}   ·   Da decidere: {pending}. "
+                "Le versioni non selezionate non verranno mai sostituite."
+            ))
+
+        def choose_selected(decision):
+            indices = conflict_list.curselection()
+            if not indices:
+                messagebox.showinfo("Conflitti", "Seleziona uno o più file nell'elenco.", parent=self.root)
+                return
+            for index in indices:
+                if index < len(shown_conflicts):
+                    resolution_choices[shown_conflicts[index]] = decision
+            render_conflict_choices()
+
+        def apply_individual_choices():
+            if not shown_conflicts:
+                messagebox.showinfo("Conflitti", "Non ci sono conflitti da risolvere.", parent=self.root)
+                return
+            missing = [p for p in shown_conflicts if p not in resolution_choices]
+            if missing:
+                messagebox.showwarning(
+                    "Scelte incomplete",
+                    f"Seleziona la versione da mantenere per tutti i file. Mancano {len(missing)} scelte.",
+                    parent=self.root
+                )
+                return
+            self._resolve_conflict("mixed", dict(resolution_choices))
+
+        conflict_list.configure(selectmode=tk.EXTENDED)
+        conflict_list.bind("<Double-Button-1>", lambda _event: choose_selected("local"))
+
         buttons = tk.Frame(self.content, bg=BG)
         buttons.pack(anchor="w", pady=10)
 
         tk.Button(
-            buttons, text="MANTIENI WORKSPACE",
-            command=lambda: self._resolve_conflict("local"),
-            bg=BLUE, fg="white", activebackground=BLUE,
-            relief="flat", bd=0, cursor="hand2",
-            font=("Segoe UI", 10, "bold"), padx=20, pady=11
+            buttons, text="USA WORKSPACE PER I SELEZIONATI",
+            command=lambda: choose_selected("local"),
+            bg=BLUE, fg="white", activebackground=BLUE, activeforeground="white",
+            relief="flat", bd=0, cursor="hand2", font=("Segoe UI", 9, "bold"),
+            padx=12, pady=11
         ).pack(side="left")
 
         tk.Button(
-            buttons, text="MANTIENI GITHUB",
-            command=lambda: self._resolve_conflict("remote"),
+            buttons, text="USA GITHUB PER I SELEZIONATI",
+            command=lambda: choose_selected("remote"),
             bg=PANEL2, fg=TEXT, activebackground=BORDER,
-            relief="flat", bd=0, cursor="hand2",
-            font=("Segoe UI", 10, "bold"), padx=20, pady=11
-        ).pack(side="left", padx=10)
+            relief="flat", bd=0, cursor="hand2", font=("Segoe UI", 9, "bold"),
+            padx=12, pady=11
+        ).pack(side="left", padx=8)
 
+        actions = tk.Frame(self.content, bg=BG)
+        actions.pack(anchor="w", pady=(2, 12))
         tk.Button(
-            buttons, text="SINCRONIZZA",
-            command=self.start_sync,
-            bg=PANEL2, fg=TEXT, activebackground=BORDER,
-            relief="flat", bd=0, cursor="hand2",
-            font=("Segoe UI", 10, "bold"), padx=20, pady=11
+            actions, text="CONFERMA TUTTE LE SCELTE",
+            command=apply_individual_choices,
+            bg=GREEN, fg=BG, activebackground=GREEN, relief="flat", bd=0,
+            cursor="hand2", font=("Segoe UI", 10, "bold"), padx=16, pady=11
         ).pack(side="left")
-
         tk.Button(
-            buttons, text="AGGIORNA",
-            command=self.show_conflicts,
-            bg=PANEL2, fg=TEXT, activebackground=BORDER,
-            relief="flat", bd=0, cursor="hand2",
-            font=("Segoe UI", 10, "bold"), padx=20, pady=11
-        ).pack(side="left", padx=10)
+            actions, text="SINCRONIZZA",
+            command=self.start_sync, bg=PANEL2, fg=TEXT,
+            relief="flat", bd=0, font=("Segoe UI", 9, "bold"),
+            padx=12, pady=11
+        ).pack(side="left", padx=8)
+        tk.Button(
+            actions, text="AGGIORNA",
+            command=self.show_conflicts, bg=PANEL2, fg=TEXT,
+            relief="flat", bd=0, font=("Segoe UI", 9, "bold"),
+            padx=12, pady=11
+        ).pack(side="left")
 
         generation = self.page_generation
 
@@ -2422,9 +2518,9 @@ class SchoolHub:
                                 "Solo questi sono veri conflitti. Scegli quale versione mantenere per TUTTI i file elencati."
                             )
                         )
-                        for path in self.last_conflicts:
-                            conflict_list.insert(tk.END, path)
-                        conflict_list.configure(height=min(12, max(3, len(self.last_conflicts))))
+                        shown_conflicts[:] = list(self.last_conflicts)
+                        resolution_choices.clear()
+                        render_conflict_choices()
                     elif local > 0:
                         status_label.configure(text="MODIFICHE SOLO LOCALI", fg=YELLOW)
                         detail_label.configure(
