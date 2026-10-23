@@ -409,8 +409,11 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $installDir = Join-Path $PWD "dist\installed-smoke"
-          & ".\dist\SchoolHub-Setup.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART "/DIR=$installDir"
-          if ($LASTEXITCODE -ne 0) { throw "Silent installer failed: $LASTEXITCODE" }
+          $setup = Start-Process ".\dist\SchoolHub-Setup.exe" -ArgumentList @(
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART',
+            ('/DIR="' + $installDir + '"')
+          ) -PassThru -Wait
+          if ($setup.ExitCode -ne 0) { throw "Silent installer failed: $($setup.ExitCode)" }
           $installedExe = Join-Path $installDir "SchoolHub.exe"
           $installedDll = Join-Path $installDir "_internal\python313.dll"
           if (!(Test-Path $installedExe)) { throw "Installed EXE missing" }
