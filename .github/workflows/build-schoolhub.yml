@@ -45,7 +45,7 @@ jobs:
           if ($actual -ne "11a25bb9e4b54868a2754b15d3c665b5384fb24cc06946a3fb0f29af6f135ba8") { throw "Source hash mismatch" }
           tar -xf "source.tar.xz"
 
-      - name: Apply SchoolHub 2.6.6 Recursive Sync State + Responsive source
+      - name: Apply SchoolHub 2.6.7 Recursive Sync State + Responsive source
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -75,7 +75,7 @@ jobs:
       - name: Prepare onedir runtime and version
         shell: pwsh
         run: |
-          "2.6.6" | Set-Content "VERSION.txt" -Encoding ascii -NoNewline
+          "2.6.7" | Set-Content "VERSION.txt" -Encoding ascii -NoNewline
           if (!(Select-String -Path "SchoolHub.spec" -SimpleMatch "exclude_binaries=True" -Quiet)) {
             throw "Onedir build required: no runtime extraction to _MEI"
           }
@@ -138,7 +138,7 @@ jobs:
               'safe default remote': 'DEFAULT_REMOTE = ""' in gui,
               'auto sync default off': '"auto_sync": False' in gui,
               'auto start default off': '"auto_start": False' in gui,
-              'version 2.6.6': 'APP_VERSION = "2.6.6"' in gui,
+              'version 2.6.7': 'APP_VERSION = "2.6.7"' in gui,
               'daily update cache': 'UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60' in gui,
               'minute clock': 'after(60000, self.update_clock)' in gui,
               'single instance': 'def _acquire_single_instance()' in gui,
@@ -182,7 +182,7 @@ jobs:
               'diagnostic export': 'def export_diagnostics' in gui and 'schoolhub-sanitized.log' in gui and '_redact_diagnostic_text' in gui,
               'safe repair': 'def repair_schoolhub' in gui and 'NON verranno eliminati' in gui,
               'support error codes': 'SH-GIT-101' in gui and 'SH-SYNC-302' in gui and 'SH-UPD-401' in gui,
-              'windows file metadata': 'version="version_info.txt"' in spec and "ProductVersion', u'2.6.6'" in version_info,
+              'windows file metadata': 'version="version_info.txt"' in spec and "ProductVersion', u'2.6.7'" in version_info,
               'safe uninstall': 'CurUninstallStepChanged' in installer and 'MB_DEFBUTTON2' in installer,
               'nondefault branch fetch': 'fetch_ref = f"refs/heads/{requested}:refs/remotes/origin/{requested}"' in gui and '["fetch", "--depth", "1", "origin", fetch_ref]' in gui,
               'branch error lists remotes': '"ls-remote", "--heads", remote' in gui,
@@ -208,7 +208,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
-          $headers = @{ "User-Agent" = "SchoolHub-Build/2.6.6"; "Authorization" = "Bearer $env:GH_TOKEN"; "Accept" = "application/vnd.github+json" }
+          $headers = @{ "User-Agent" = "SchoolHub-Build/2.6.7"; "Authorization" = "Bearer $env:GH_TOKEN"; "Accept" = "application/vnd.github+json" }
           $release = Invoke-RestMethod -Uri "https://api.github.com/repos/git-for-windows/git/releases/latest" -Headers $headers
           $asset = $release.assets | Where-Object { $_.name -match '^MinGit-.*-64-bit\.zip$' } | Select-Object -First 1
           if (-not $asset) { throw "Official 64-bit MinGit asset not found" }
@@ -225,7 +225,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
-          $headers = @{ "User-Agent" = "SchoolHub-Build/2.6.6"; "Authorization" = "Bearer $env:GH_TOKEN"; "Accept" = "application/vnd.github+json" }
+          $headers = @{ "User-Agent" = "SchoolHub-Build/2.6.7"; "Authorization" = "Bearer $env:GH_TOKEN"; "Accept" = "application/vnd.github+json" }
           $release = Invoke-RestMethod -Uri "https://api.github.com/repos/git-ecosystem/git-credential-manager/releases/latest" -Headers $headers
           $asset = $release.assets | Where-Object { $_.name -like "gcm-win-x64-*.zip" -and $_.name -notlike "*symbols*" } | Select-Object -First 1
           if (-not $asset) { throw "Git Credential Manager x64 ZIP not found" }
@@ -243,7 +243,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
-          $headers = @{ "User-Agent" = "SchoolHub-Build/2.6.6"; "Authorization" = "Bearer $env:GH_TOKEN"; "Accept" = "application/vnd.github+json" }
+          $headers = @{ "User-Agent" = "SchoolHub-Build/2.6.7"; "Authorization" = "Bearer $env:GH_TOKEN"; "Accept" = "application/vnd.github+json" }
           $release = Invoke-RestMethod -Uri "https://api.github.com/repos/git-lfs/git-lfs/releases/latest" -Headers $headers
           $asset = $release.assets | Where-Object { $_.name -like "git-lfs-windows-amd64-*.zip" } | Select-Object -First 1
           if (-not $asset) { throw "Git LFS Windows amd64 ZIP not found" }
@@ -278,7 +278,7 @@ jobs:
           Write-Host "Complete onedir size: $mb MB"
           if ($size -gt 450MB) { throw "Onedir size budget exceeded: $mb MB" }
           $vi = (Get-Item $exe).VersionInfo
-          if ($vi.ProductVersion -notlike "2.6.6*") { throw "EXE ProductVersion metadata missing" }
+          if ($vi.ProductVersion -notlike "2.6.7*") { throw "EXE ProductVersion metadata missing" }
           if ($vi.CompanyName -ne "SchoolHub") { throw "EXE CompanyName metadata missing" }
 
       - name: Self-test EXE
@@ -312,7 +312,7 @@ jobs:
           if (-not $result.checks.responsive_ui_core) { throw "Responsive UI core test failed" }
           if (-not $result.checks.device_recursive_content_state) { throw "Recursive device content state test failed" }
           if (-not $result.checks.safe_default_remote) { throw "Privacy remote failed" }
-          if ($result.checks.version -ne "2.6.6") { throw "Wrong version" }
+          if ($result.checks.version -ne "2.6.7") { throw "Wrong version" }
 
       - name: Frozen independent restart regression
         shell: pwsh
@@ -401,7 +401,7 @@ jobs:
           Write-Host "Installer size: $([math]::Round((Get-Item '.\dist\SchoolHub-Setup.exe').Length / 1MB, 1)) MB"
           $setupVi = (Get-Item ".\dist\SchoolHub-Setup.exe").VersionInfo
           Write-Host "Setup ProductVersion: $($setupVi.ProductVersion) Company: $($setupVi.CompanyName)"
-          if ($setupVi.ProductVersion -notlike "2.6.6*") { throw "Setup ProductVersion metadata missing" }
+          if ($setupVi.ProductVersion -notlike "2.6.7*") { throw "Setup ProductVersion metadata missing" }
           if ($setupVi.CompanyName.Trim() -ne "SchoolHub") { throw "Setup CompanyName metadata missing" }
 
       - name: Test real installed EXE and Python DLL
@@ -441,7 +441,7 @@ jobs:
       - name: Upload verified Windows packages
         uses: actions/upload-artifact@v4
         with:
-          name: SchoolHub-Windows-v2.6.6
+          name: SchoolHub-Windows-v2.6.7
           path: |
             dist/SchoolHub-Setup.exe
             dist/SchoolHub-Setup.exe.sha256.txt
@@ -460,11 +460,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "schoolhub-v2.6.6"
-          $notes = "SchoolHub 2.6.6: fix errore tuple della GitHub API durante login e sync, DLL Python stabile con build onedir senza estrazione temporanea _MEI, test reale dell'installer, conflitti per documento, UI e avvio animato. Installa con SchoolHub-Setup.exe oppure estrai lo ZIP portatile completo."
+          $tag = "schoolhub-v2.6.7"
+          $notes = "SchoolHub 2.6.7: Centro conflitti con ricerca, selezione multipla, anteprima differenze testuali, conferme per singolo file, verifica modifiche concorrenti, backup cifrato pre-risoluzione e protezione da collisioni file-cartella. UI aggiornata. Installer Windows con runtime stabile e test completo."
           if (gh release view $tag --repo "$env:GITHUB_REPOSITORY" *> $null) {
             gh release upload $tag ".\dist\SchoolHub-Portable.zip#SchoolHub-Portable.zip" ".\dist\SchoolHub-Portable.zip.sha256.txt#SchoolHub-Portable.zip.sha256.txt" ".\dist\SchoolHub-Setup.exe#SchoolHub-Setup.exe" ".\dist\SchoolHub-Setup.exe.sha256.txt#SchoolHub-Setup.exe.sha256.txt" --clobber --repo "$env:GITHUB_REPOSITORY"
-            gh release edit $tag --title "SchoolHub 2.6.6 Recursive Sync State + Responsive" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
+            gh release edit $tag --title "SchoolHub 2.6.7 Recursive Sync State + Responsive" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
           } else {
-            gh release create $tag ".\dist\SchoolHub-Portable.zip#SchoolHub-Portable.zip" ".\dist\SchoolHub-Portable.zip.sha256.txt#SchoolHub-Portable.zip.sha256.txt" ".\dist\SchoolHub-Setup.exe#SchoolHub-Setup.exe" ".\dist\SchoolHub-Setup.exe.sha256.txt#SchoolHub-Setup.exe.sha256.txt" --target "$env:GITHUB_SHA" --title "SchoolHub 2.6.6 Recursive Sync State + Responsive" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
+            gh release create $tag ".\dist\SchoolHub-Portable.zip#SchoolHub-Portable.zip" ".\dist\SchoolHub-Portable.zip.sha256.txt#SchoolHub-Portable.zip.sha256.txt" ".\dist\SchoolHub-Setup.exe#SchoolHub-Setup.exe" ".\dist\SchoolHub-Setup.exe.sha256.txt#SchoolHub-Setup.exe.sha256.txt" --target "$env:GITHUB_SHA" --title "SchoolHub 2.6.7 Recursive Sync State + Responsive" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
           }
