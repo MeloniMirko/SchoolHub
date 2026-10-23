@@ -394,27 +394,48 @@ jobs:
           if ($setupVi.ProductVersion -notlike "2.6.6*") { throw "Setup ProductVersion metadata missing" }
           if ($setupVi.CompanyName.Trim() -ne "SchoolHub") { throw "Setup CompanyName metadata missing" }
 
-      - name: Checksum
+      - name: Test real installed EXE and Python DLL
         shell: pwsh
         run: |
-          $hash = (Get-FileHash ".\dist\SchoolHub\SchoolHub.exe" -Algorithm SHA256).Hash.ToLower()
-          "$hash  SchoolHub.exe" | Set-Content ".\dist\SchoolHub\SchoolHub.exe.sha256.txt" -Encoding ASCII
-          $setupHash = (Get-FileHash ".\dist\SchoolHub-Setup.exe" -Algorithm SHA256).Hash.ToLower()
-          "$setupHash  SchoolHub-Setup.exe" | Set-Content ".\dist\SchoolHub-Setup.exe.sha256.txt" -Encoding ASCII
-          Get-Content ".\dist\SchoolHub\SchoolHub.exe.sha256.txt"
-          Get-Content ".\dist\SchoolHub-Setup.exe.sha256.txt"
+          $ErrorActionPreference = "Stop"
+          $installDir = Join-Path $PWD "dist\installed-smoke"
+          & ".\dist\SchoolHub-Setup.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART "/DIR=$installDir"
+          if ($LASTEXITCODE -ne 0) { throw "Silent installer failed: $LASTEXITCODE" }
+          $installedExe = Join-Path $installDir "SchoolHub.exe"
+          $installedDll = Join-Path $installDir "_internal\python313.dll"
+          if (!(Test-Path $installedExe)) { throw "Installed EXE missing" }
+          if (!(Test-Path $installedDll)) { throw "Installed Python DLL missing" }
+          if ((Get-FileHash $installedDll).Hash -ne (Get-FileHash ".\dist\SchoolHub\_internal\python313.dll").Hash) {
+            throw "Installed DLL checksum mismatch"
+          }
+          $out = Join-Path $PWD "dist\installed-selftest.json"
+          $p = Start-Process $installedExe -ArgumentList @("--self-test", $out) -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "Installed EXE exited $($p.ExitCode)" }
+          if (!(Test-Path $out)) { throw "Installed EXE could not load Python" }
+          $result = Get-Content $out -Raw | ConvertFrom-Json
+          if (!$result.ok) { throw "Installed EXE self-test failed: $($result.error)" }
 
-      - name: Upload artifact
+      - name: Checksum and portable archive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Compress-Archive -Path ".\dist\SchoolHub" -DestinationPath ".\dist\SchoolHub-Portable.zip" -CompressionLevel Optimal -Force
+          $zipHash = (Get-FileHash ".\dist\SchoolHub-Portable.zip" -Algorithm SHA256).Hash.ToLower()
+          "$zipHash  SchoolHub-Portable.zip" | Set-Content ".\dist\SchoolHub-Portable.zip.sha256.txt" -Encoding ascii
+          $setupHash = (Get-FileHash ".\dist\SchoolHub-Setup.exe" -Algorithm SHA256).Hash.ToLower()
+          "$setupHash  SchoolHub-Setup.exe" | Set-Content ".\dist\SchoolHub-Setup.exe.sha256.txt" -Encoding ascii
+
+      - name: Upload verified Windows packages
         uses: actions/upload-artifact@v4
         with:
-          name: SchoolHub-Windows-v2.6.6-Responsive
+          name: SchoolHub-Windows-v2.6.6
           path: |
-            dist/SchoolHub.exe
-            dist/SchoolHub.exe.sha256.txt
             dist/SchoolHub-Setup.exe
             dist/SchoolHub-Setup.exe.sha256.txt
+            dist/SchoolHub-Portable.zip
+            dist/SchoolHub-Portable.zip.sha256.txt
             dist/selftest.json
-            schoolhub_splash.png
+            dist/installed-selftest.json
             dist/startup-*.png
             dist/startup-visual.json
           compression-level: 0
@@ -427,10 +448,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "schoolhub-v2.6.6"
-          $notes = "SchoolHub 2.6.6: nuova animazione di avvio con orbite dinamiche, interfaccia raffinata, scelta esplicita per ogni file in conflitto, diagnostica avanzata per Access Denied, scritture atomiche uniche e retry temporanei per file bloccati. Include tutte le funzionalita e le protezioni della 2.6.4."
+          $notes = "SchoolHub 2.6.6: fix errore tuple della GitHub API durante login e sync, DLL Python stabile con build onedir senza estrazione temporanea _MEI, test reale dell'installer, conflitti per documento, UI e avvio animato. Installa con SchoolHub-Setup.exe oppure estrai lo ZIP portatile completo."
           if (gh release view $tag --repo "$env:GITHUB_REPOSITORY" *> $null) {
-            gh release upload $tag ".\dist\SchoolHub\SchoolHub.exe#SchoolHub.exe" ".\dist\SchoolHub\SchoolHub.exe.sha256.txt#SchoolHub.exe.sha256.txt" ".\dist\SchoolHub-Setup.exe#SchoolHub-Setup.exe" ".\dist\SchoolHub-Setup.exe.sha256.txt#SchoolHub-Setup.exe.sha256.txt" --clobber --repo "$env:GITHUB_REPOSITORY"
+            gh release upload $tag ".\dist\SchoolHub-Portable.zip#SchoolHub-Portable.zip" ".\dist\SchoolHub-Portable.zip.sha256.txt#SchoolHub-Portable.zip.sha256.txt" ".\dist\SchoolHub-Setup.exe#SchoolHub-Setup.exe" ".\dist\SchoolHub-Setup.exe.sha256.txt#SchoolHub-Setup.exe.sha256.txt" --clobber --repo "$env:GITHUB_REPOSITORY"
             gh release edit $tag --title "SchoolHub 2.6.6 Recursive Sync State + Responsive" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
           } else {
-            gh release create $tag ".\dist\SchoolHub\SchoolHub.exe#SchoolHub.exe" ".\dist\SchoolHub\SchoolHub.exe.sha256.txt#SchoolHub.exe.sha256.txt" ".\dist\SchoolHub-Setup.exe#SchoolHub-Setup.exe" ".\dist\SchoolHub-Setup.exe.sha256.txt#SchoolHub-Setup.exe.sha256.txt" --target "$env:GITHUB_SHA" --title "SchoolHub 2.6.6 Recursive Sync State + Responsive" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
+            gh release create $tag ".\dist\SchoolHub-Portable.zip#SchoolHub-Portable.zip" ".\dist\SchoolHub-Portable.zip.sha256.txt#SchoolHub-Portable.zip.sha256.txt" ".\dist\SchoolHub-Setup.exe#SchoolHub-Setup.exe" ".\dist\SchoolHub-Setup.exe.sha256.txt#SchoolHub-Setup.exe.sha256.txt" --target "$env:GITHUB_SHA" --title "SchoolHub 2.6.6 Recursive Sync State + Responsive" --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
           }
