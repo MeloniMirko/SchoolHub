@@ -23,9 +23,8 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="SchoolHub",
     icon="schoolhub.ico",
     version="version_info.txt",
@@ -34,4 +33,14 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,
+)
+
+# Onedir ships Python DLLs alongside the EXE in _internal. No _MEI temp extraction.
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    name="SchoolHub",
 )
