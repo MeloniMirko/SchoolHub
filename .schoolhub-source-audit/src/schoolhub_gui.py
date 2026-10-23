@@ -2529,207 +2529,327 @@ class SchoolHub:
                 self.root.after(0, self.refresh_status)
 
     def show_conflicts(self):
+        """Safe conflict review: searchable table, per-file decisions and text diff."""
         self.clear_content()
-
         self.section_title(
-            "Conflitti",
-            "Controllo reale tra Workspace e GitHub. Nessun file viene sovrascritto automaticamente."
+            "Centro conflitti",
+            "Confronta le versioni e decidi per ogni file. Nulla viene sostituito senza conferma."
         )
+        generation = self.page_generation
+        report = {"conflicts": [], "descriptions": {}, "token": None}
+        choices = {}
+        visible_paths = []
 
-        card = tk.Frame(
-            self.content, bg=PANEL,
-            highlightbackground=BORDER, highlightthickness=1
+        hero = tk.Frame(self.content, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
+        hero.pack(fill="x", pady=(10, 14))
+        headline = tk.Label(
+            hero, text="ANALISI DELLE VERSIONI IN CORSO",
+            font=("Segoe UI", 15, "bold"), fg=CYAN, bg=PANEL, anchor="w"
         )
-        card.pack(fill="x", pady=15)
-
-        status_label = tk.Label(
-            card, text="CONTROLLO IN CORSO...",
-            font=("Segoe UI", 15, "bold"), fg=YELLOW, bg=PANEL
+        headline.pack(fill="x", padx=22, pady=(17, 5))
+        details = tk.Label(
+            hero, text="Controllo in sicurezza di Workspace, GitHub e ultima sincronizzazione…",
+            font=("Segoe UI", 10), fg=MUTED, bg=PANEL,
+            justify="left", anchor="w", wraplength=700
         )
-        status_label.pack(anchor="w", padx=22, pady=(22, 5))
-
-        detail_label = tk.Label(
-            card, text="Confronto Workspace e GitHub con la baseline dell'ultima sync.",
-            font=("Segoe UI", 9), fg=MUTED, bg=PANEL,
-            justify="left", wraplength=800
+        details.pack(fill="x", padx=22, pady=(0, 12))
+        counters = tk.Label(
+            hero, text="0 file in conflitto    •    0 da decidere",
+            font=("Segoe UI", 10, "bold"), fg=TEXT, bg=PANEL, anchor="w"
         )
-        detail_label.pack(anchor="w", padx=22, pady=(0, 10))
+        counters.pack(fill="x", padx=22, pady=(0, 17))
 
-        help_label = tk.Label(
-            card,
-            text="Se entrambi sono cambiati, puoi scegliere esplicitamente quale versione mantenere.",
-            font=("Segoe UI", 9), fg=MUTED, bg=PANEL,
-            justify="left", wraplength=800
+        toolbar = tk.Frame(self.content, bg=BG)
+        toolbar.pack(fill="x", pady=(2, 10))
+        tk.Label(toolbar, text="CERCA FILE", font=("Segoe UI", 9, "bold"),
+                 bg=BG, fg=MUTED).pack(side="left", padx=(0, 10))
+        query = tk.StringVar()
+        search = tk.Entry(
+            toolbar, textvariable=query, bg=PANEL2, fg=TEXT,
+            insertbackground=CYAN, selectbackground=BLUE, relief="flat",
+            bd=0, font=("Segoe UI", 10), width=33
         )
-        help_label.pack(anchor="w", padx=22, pady=(0, 10))
-
-        conflict_list = tk.Listbox(
-            card, height=7, bg=PANEL2, fg=TEXT, selectbackground=BLUE,
-            selectforeground="white", relief="flat", bd=0, font=("Consolas", 9)
+        search.pack(side="left", fill="x", expand=True, ipady=8)
+        tk.Label(toolbar, text="FILTRO", font=("Segoe UI", 9, "bold"),
+                 bg=BG, fg=MUTED).pack(side="left", padx=(16, 8))
+        filter_var = tk.StringVar(value="Tutti")
+        filter_menu = ttk.Combobox(
+            toolbar, state="readonly", textvariable=filter_var, width=14,
+            values=("Tutti", "Da decidere", "Workspace", "GitHub")
         )
-        conflict_list.pack(fill="x", padx=22, pady=(0, 22))
+        filter_menu.pack(side="left")
 
-        # Keep choices attached to paths, not list indices. No automatic overwrite.
-        resolution_choices = {}
-        shown_conflicts = []
-
-        choice_hint = tk.Label(
-            self.content,
-            text="Seleziona un file e indica quale versione conservare. Nessuna scelta predefinita.",
-            font=("Segoe UI", 9), fg=MUTED, bg=BG,
-            wraplength=640, justify="left"
+        table_panel = tk.Frame(self.content, bg=PANEL,
+                               highlightthickness=1, highlightbackground=BORDER)
+        table_panel.pack(fill="x", pady=(0, 12))
+        style = ttk.Style(self.root)
+        style.configure(
+            "SchoolHubReview.Treeview", background=PANEL2, fieldbackground=PANEL2,
+            foreground=TEXT, rowheight=34, font=("Segoe UI", 10),
+            borderwidth=0, relief="flat"
         )
-        choice_hint.pack(anchor="w", pady=(0, 8))
+        style.configure(
+            "SchoolHubReview.Treeview.Heading", background=PANEL,
+            foreground=CYAN, font=("Segoe UI", 9, "bold"), padding=8
+        )
+        style.map("SchoolHubReview.Treeview",
+                  background=[("selected", "#23558b")],
+                  foreground=[("selected", "#ffffff")])
+        columns = ("decision", "path", "type")
+        table = ttk.Treeview(
+            table_panel, columns=columns, show="headings", selectmode="extended",
+            height=10, style="SchoolHubReview.Treeview"
+        )
+        table.heading("decision", text="SCELTA")
+        table.heading("path", text="NOME FILE / PERCORSO")
+        table.heading("type", text="DIFFERENZA")
+        table.column("decision", width=148, minwidth=105, stretch=False)
+        table.column("path", width=420, minwidth=190, stretch=True)
+        table.column("type", width=175, minwidth=125, stretch=False)
+        vertical = ttk.Scrollbar(table_panel, orient="vertical", command=table.yview)
+        table.configure(yscrollcommand=vertical.set)
+        vertical.pack(side="right", fill="y")
+        table.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=10)
+        table.tag_configure("pending", foreground=YELLOW)
+        table.tag_configure("decided", foreground=TEXT)
+        table.tag_configure("local", foreground=GREEN)
+        table.tag_configure("remote", foreground=CYAN)
 
-        def render_conflict_choices():
-            selected = conflict_list.curselection()
-            conflict_list.delete(0, tk.END)
-            for path in shown_conflicts:
-                decision = resolution_choices.get(path)
-                label = ("✓  WORKSPACE" if decision == "local" else
-                         "✓  GITHUB   " if decision == "remote" else
-                         "·  DA DECIDERE")
-                conflict_list.insert(tk.END, f"{label}    {path}")
-            conflict_list.configure(height=min(12, max(3, len(shown_conflicts))))
-            for index in selected:
-                if index < len(shown_conflicts):
-                    conflict_list.selection_set(index)
-            pending = sum(p not in resolution_choices for p in shown_conflicts)
-            choice_hint.configure(text=(
-                f"File in conflitto: {len(shown_conflicts)}   ·   Da decidere: {pending}. "
-                "Le versioni non selezionate non verranno mai sostituite."
+        buttons = tk.Frame(self.content, bg=BG)
+        buttons.pack(fill="x", pady=(0, 8))
+        def action(text, command, bg, fg=TEXT):
+            button = tk.Button(
+                buttons, text=text, command=command, bg=bg, fg=fg,
+                activebackground=PANEL3, activeforeground="#ffffff",
+                relief="flat", bd=0, font=("Segoe UI", 9, "bold"),
+                cursor="hand2", padx=12, pady=10
+            )
+            button.pack(side="left", padx=(0, 8), pady=(0, 4))
+            return button
+
+        def selected_paths():
+            return [path for path in table.selection() if path in report["conflicts"]]
+
+        def repaint():
+            selected = set(table.selection())
+            for item in table.get_children():
+                table.delete(item)
+            word = query.get().strip().casefold()
+            category = filter_var.get()
+            visible_paths[:] = []
+            for path in report["conflicts"]:
+                decision = choices.get(path)
+                if word and word not in path.casefold():
+                    continue
+                if category == "Da decidere" and decision:
+                    continue
+                if category == "Workspace" and decision != "local":
+                    continue
+                if category == "GitHub" and decision != "remote":
+                    continue
+                visible_paths.append(path)
+                name = "DA DECIDERE" if not decision else (
+                    "WORKSPACE" if decision == "local" else "GITHUB"
+                )
+                tag = "pending" if not decision else decision
+                table.insert("", "end", iid=path, values=(
+                    name, path, report["descriptions"].get(path, "File differente")
+                ), tags=(tag,))
+            if selected:
+                table.selection_set([p for p in selected if table.exists(p)])
+            pending = len(report["conflicts"]) - len(choices)
+            counters.configure(text=(
+                f"{len(report['conflicts'])} in conflitto    •    "
+                f"{len(choices)} scelti    •    {pending} da decidere    •    "
+                f"{len(visible_paths)} visibili"
             ))
+            can_confirm = bool(report["conflicts"]) and pending == 0 and report["token"]
+            confirm.configure(state="normal" if can_confirm else "disabled",
+                              bg=GREEN if can_confirm else PANEL3,
+                              fg=BG if can_confirm else MUTED)
 
-        def choose_selected(decision):
-            indices = conflict_list.curselection()
-            if not indices:
-                messagebox.showinfo("Conflitti", "Seleziona uno o più file nell'elenco.", parent=self.root)
-                return
-            for index in indices:
-                if index < len(shown_conflicts):
-                    resolution_choices[shown_conflicts[index]] = decision
-            render_conflict_choices()
-
-        def apply_individual_choices():
-            if not shown_conflicts:
-                messagebox.showinfo("Conflitti", "Non ci sono conflitti da risolvere.", parent=self.root)
-                return
-            missing = [p for p in shown_conflicts if p not in resolution_choices]
-            if missing:
-                messagebox.showwarning(
-                    "Scelte incomplete",
-                    f"Seleziona la versione da mantenere per tutti i file. Mancano {len(missing)} scelte.",
+        def choose(decision):
+            paths = selected_paths()
+            if not paths:
+                messagebox.showinfo(
+                    "Seleziona un file", "Seleziona una o più righe prima di decidere.",
                     parent=self.root
                 )
                 return
-            self._resolve_conflict("mixed", dict(resolution_choices))
+            for path in paths:
+                if decision is None:
+                    choices.pop(path, None)
+                else:
+                    choices[path] = decision
+            repaint()
 
-        conflict_list.configure(selectmode=tk.EXTENDED)
-        conflict_list.bind("<Double-Button-1>", lambda _event: choose_selected("local"))
+        action("MANTIENI VERSIONE PC", lambda: choose("local"), BLUE, "white")
+        action("MANTIENI VERSIONE GITHUB", lambda: choose("remote"), PANEL2)
+        action("AZZERA SCELTA", lambda: choose(None), PANEL2)
 
-        buttons = tk.Frame(self.content, bg=BG)
-        buttons.pack(anchor="w", pady=10)
+        preview_panel = tk.Frame(self.content, bg=PANEL,
+                                 highlightthickness=1, highlightbackground=BORDER)
+        preview_panel.pack(fill="x", pady=(4, 13))
+        tk.Label(
+            preview_panel, text="ANTEPRIMA DIFFERENZE · SOLA LETTURA",
+            font=("Segoe UI", 10, "bold"), bg=PANEL, fg=CYAN
+        ).pack(anchor="w", padx=16, pady=(12, 6))
+        preview = tk.Text(
+            preview_panel, height=10, bg="#0b1728", fg=TEXT,
+            relief="flat", bd=0, wrap="none", font=("Consolas", 9),
+            insertbackground=TEXT, padx=11, pady=9,
+            takefocus=False
+        )
+        preview.pack(fill="x", padx=12, pady=(0, 12))
+        preview.tag_configure("addition", foreground=GREEN)
+        preview.tag_configure("deletion", foreground=RED)
+        preview.tag_configure("meta", foreground=CYAN)
 
-        tk.Button(
-            buttons, text="USA WORKSPACE PER I SELEZIONATI",
-            command=lambda: choose_selected("local"),
-            bg=BLUE, fg="white", activebackground=BLUE, activeforeground="white",
-            relief="flat", bd=0, cursor="hand2", font=("Segoe UI", 9, "bold"),
-            padx=12, pady=11
-        ).pack(side="left")
+        def display_diff(value):
+            if not self.running or generation != self.page_generation:
+                return
+            preview.configure(state="normal")
+            preview.delete("1.0", tk.END)
+            for line in value.splitlines():
+                tag = ("addition" if line.startswith("+") and not line.startswith("+++")
+                       else "deletion" if line.startswith("-") and not line.startswith("---")
+                       else "meta" if line.startswith(("@@", "---", "+++"))
+                       else None)
+                if tag:
+                    preview.insert(tk.END, line + "\n", tag)
+                else:
+                    preview.insert(tk.END, line + "\n")
+            preview.configure(state="disabled")
 
-        tk.Button(
-            buttons, text="USA GITHUB PER I SELEZIONATI",
-            command=lambda: choose_selected("remote"),
-            bg=PANEL2, fg=TEXT, activebackground=BORDER,
-            relief="flat", bd=0, cursor="hand2", font=("Segoe UI", 9, "bold"),
-            padx=12, pady=11
-        ).pack(side="left", padx=8)
-
+        display_diff(
+            "Seleziona un file e premi ANTEPRIMA per vedere le differenze testuali.\n"
+            "Per PDF, immagini, file Word e documenti grandi si mostra solo la disponibilità "
+            "delle versioni, senza tentare una fusione automatica."
+        )
+        preview_counter = {"id": 0}
+        def request_preview():
+            paths = selected_paths()
+            if len(paths) != 1:
+                messagebox.showinfo(
+                    "Anteprima", "Seleziona esattamente un file nell'elenco.",
+                    parent=self.root
+                )
+                return
+            path = paths[0]
+            preview_counter["id"] += 1
+            request_id = preview_counter["id"]
+            display_diff(f"Caricamento delle versioni di {path}…")
+            def worker():
+                try:
+                    with tempfile.TemporaryDirectory(prefix="schoolhub-diff-") as temporary:
+                        repo = os.path.join(temporary, "repo")
+                        self._assert_remote_private()
+                        self._clone_remote(repo)
+                        if not self.workspace.is_unlocked:
+                            raise WorkspaceError("Workspace bloccato: sbloccalo e riprova.")
+                        result = self._text_diff_preview(
+                            self.workspace.get_unlocked_path(), repo, path
+                        )
+                except Exception as exc:
+                    result = "Anteprima non disponibile: " + str(exc)
+                if self.running:
+                    self.root.after(0, lambda text=result: (
+                        display_diff(text) if preview_counter["id"] == request_id else None
+                    ))
+            threading.Thread(target=worker, daemon=True).start()
         actions = tk.Frame(self.content, bg=BG)
-        actions.pack(anchor="w", pady=(2, 12))
+        actions.pack(fill="x", pady=(1, 10))
+        preview_btn = tk.Button(
+            actions, text="ANTEPRIMA FILE", command=request_preview,
+            bg=PANEL2, fg=CYAN, relief="flat", bd=0, cursor="hand2",
+            font=("Segoe UI", 9, "bold"), padx=14, pady=11
+        )
+        preview_btn.pack(side="left", padx=(0, 8))
+        table.bind("<Double-1>", lambda _event: request_preview())
+
+        def confirm_choices():
+            unresolved = set(report["conflicts"]) - set(choices)
+            if not report["token"] or unresolved:
+                messagebox.showwarning(
+                    "Scelte incomplete",
+                    f"Restano {len(unresolved)} file senza una scelta.",
+                    parent=self.root
+                )
+                return
+            self._resolve_conflict("mixed", dict(choices), expected_token=report["token"])
+
+        confirm = tk.Button(
+            actions, text="APPLICA LE SCELTE IN SICUREZZA",
+            command=confirm_choices, bg=PANEL3, fg=MUTED,
+            relief="flat", bd=0, cursor="hand2",
+            font=("Segoe UI", 10, "bold"), padx=17, pady=11, state="disabled"
+        )
+        confirm.pack(side="left", padx=(0, 8))
         tk.Button(
-            actions, text="CONFERMA TUTTE LE SCELTE",
-            command=apply_individual_choices,
-            bg=GREEN, fg=BG, activebackground=GREEN, relief="flat", bd=0,
-            cursor="hand2", font=("Segoe UI", 10, "bold"), padx=16, pady=11
-        ).pack(side="left")
-        tk.Button(
-            actions, text="SINCRONIZZA",
-            command=self.start_sync, bg=PANEL2, fg=TEXT,
-            relief="flat", bd=0, font=("Segoe UI", 9, "bold"),
-            padx=12, pady=11
-        ).pack(side="left", padx=8)
-        tk.Button(
-            actions, text="AGGIORNA",
-            command=self.show_conflicts, bg=PANEL2, fg=TEXT,
-            relief="flat", bd=0, font=("Segoe UI", 9, "bold"),
-            padx=12, pady=11
+            actions, text="RICONTROLLA", command=self.show_conflicts,
+            bg=PANEL2, fg=TEXT, relief="flat", bd=0, cursor="hand2",
+            font=("Segoe UI", 9, "bold"), padx=14, pady=11
         ).pack(side="left")
 
-        generation = self.page_generation
+        help_text = tk.Label(
+            self.content, bg=BG, fg=MUTED, font=("Segoe UI", 9),
+            wraplength=710, justify="left", anchor="w",
+            text=(
+                "Protezione: la decisione rimane associata al percorso reale, "
+                "SchoolHub ricontrolla le impronte SHA-256 prima di applicarla "
+                "e crea un backup cifrato dei file locali. "
+                "Se un altro dispositivo modifica i file nel frattempo, l'operazione viene annullata."
+            )
+        )
+        help_text.pack(fill="x", pady=(2, 15))
+        query.trace_add("write", lambda *_: repaint())
+        filter_menu.bind("<<ComboboxSelected>>", lambda _event: repaint())
 
         def worker():
-            local, remote, changes = self.get_status()
-
+            try:
+                result = self._inspect_conflicts()
+                error = None
+            except Exception as exc:
+                result = None
+                error = str(exc)
             def update():
                 if not self.running or generation != self.page_generation:
                     return
-                try:
-                    conflict_list.delete(0, tk.END)
-                    if local is None:
-                        status_label.configure(text="IMPOSSIBILE CONTROLLARE", fg=RED)
-                        detail_label.configure(
-                            text=str(remote or "Repository/GitHub non disponibile.")
-                        )
-                        return
-
-                    if self.last_conflicts:
-                        status_label.configure(text="⚠ CONFLITTO RILEVATO", fg=RED)
-                        detail_label.configure(
-                            text=(
-                                f"Workspace: {local} file cambiati · GitHub: {remote} file cambiati.\n"
-                                f"I file sotto sono quelli che sono stati modificati da entrambe le parti.\n"
-                                "Solo questi sono veri conflitti. Scegli una versione per ciascun file."
-                            )
-                        )
-                        shown_conflicts[:] = list(self.last_conflicts)
-                        resolution_choices.clear()
-                        render_conflict_choices()
-                    elif local > 0 and remote > 0:
-                        status_label.configure(text="MODIFICHE INDIPENDENTI", fg=CYAN)
-                        detail_label.configure(
-                            text=f"{local} modifiche locali e {remote} modifiche GitHub su file diversi. Nessun conflitto: usa Sincronizza."
-                        )
-                    elif local > 0:
-                        status_label.configure(text="MODIFICHE SOLO LOCALI", fg=YELLOW)
-                        detail_label.configure(
-                            text=f"{local} file modificati nel Workspace. Nessun conflitto: verranno sincronizzati automaticamente."
-                        )
-                    elif remote > 0:
-                        status_label.configure(text="MODIFICHE SOLO SU GITHUB", fg=YELLOW)
-                        detail_label.configure(
-                            text=f"{remote} file modificati su GitHub. Nessun conflitto: verranno importati automaticamente."
-                        )
-                    else:
-                        status_label.configure(text="✓ NESSUN CONFLITTO", fg=GREEN)
-                        detail_label.configure(
-                            text="Workspace e GitHub sono sincronizzati."
-                        )
-                except tk.TclError:
-                    pass
-
+                if error:
+                    headline.configure(text="CONTROLLO NON DISPONIBILE", fg=RED)
+                    details.configure(text=error)
+                    return
+                report.clear()
+                report.update(result)
+                choices.clear()
+                self.last_conflicts = list(report["conflicts"])
+                total = len(report["conflicts"])
+                if total:
+                    headline.configure(text=f"{total} CONFLITTI DA RISOLVERE", fg=YELLOW)
+                    details.configure(text=(
+                        f"{report['local_count']} modifiche soltanto locali · "
+                        f"{report['remote_count']} modifiche soltanto GitHub.\n"
+                        "Le differenze qui sotto richiedono una scelta esplicita. "
+                        "Doppio clic per l'anteprima."
+                    ))
+                elif report["local_count"] or report["remote_count"]:
+                    headline.configure(text="NESSUN CONFLITTO", fg=GREEN)
+                    details.configure(text=(
+                        f"{report['local_count']} modifiche locali · "
+                        f"{report['remote_count']} modifiche GitHub indipendenti. "
+                        "Puoi usare Sincronizza per unirle."
+                    ))
+                else:
+                    headline.configure(text="TUTTO AGGIORNATO", fg=GREEN)
+                    details.configure(text="Workspace e GitHub coincidono. Nessuna scelta richiesta.")
+                repaint()
             if self.running:
                 self.root.after(0, update)
-
         if self.git_enabled:
             threading.Thread(target=worker, daemon=True).start()
         else:
-            status_label.configure(text="VAULT LOCALE", fg=GREEN)
-            detail_label.configure(
-                text="Questo Vault non usa GitHub. I conflitti Git non si applicano."
-            )
-            help_label.configure(text="Il Vault è completamente locale e indipendente.")
+            headline.configure(text="SINCRONIZZAZIONE DISATTIVATA", fg=MUTED)
+            details.configure(text="Il Vault è locale. Configura GitHub nelle Impostazioni per attivarla.")
 
     # ========================================================
     # ACTIVITY
