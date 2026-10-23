@@ -16,6 +16,10 @@ on:
       - ".schoolhub-source-audit/**"
   workflow_dispatch:
 
+concurrency:
+  group: schoolhub-windows-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: write
 
@@ -200,9 +204,11 @@ jobs:
 
       - name: Bundle official MinGit
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
-          $headers = @{ "User-Agent" = "SchoolHub-Build/2.4" }
+          $headers = @{ "User-Agent" = "SchoolHub-Build/2.6.6"; "Authorization" = "Bearer $env:GH_TOKEN"; "Accept" = "application/vnd.github+json" }
           $release = Invoke-RestMethod -Uri "https://api.github.com/repos/git-for-windows/git/releases/latest" -Headers $headers
           $asset = $release.assets | Where-Object { $_.name -match '^MinGit-.*-64-bit\.zip$' } | Select-Object -First 1
           if (-not $asset) { throw "Official 64-bit MinGit asset not found" }
@@ -215,9 +221,11 @@ jobs:
 
       - name: Bundle Git Credential Manager
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
-          $headers = @{ "User-Agent" = "SchoolHub-Build/2.4" }
+          $headers = @{ "User-Agent" = "SchoolHub-Build/2.6.6"; "Authorization" = "Bearer $env:GH_TOKEN"; "Accept" = "application/vnd.github+json" }
           $release = Invoke-RestMethod -Uri "https://api.github.com/repos/git-ecosystem/git-credential-manager/releases/latest" -Headers $headers
           $asset = $release.assets | Where-Object { $_.name -like "gcm-win-x64-*.zip" -and $_.name -notlike "*symbols*" } | Select-Object -First 1
           if (-not $asset) { throw "Git Credential Manager x64 ZIP not found" }
@@ -231,9 +239,11 @@ jobs:
 
       - name: Bundle Git LFS
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
-          $headers = @{ "User-Agent" = "SchoolHub-Build/2.4" }
+          $headers = @{ "User-Agent" = "SchoolHub-Build/2.6.6"; "Authorization" = "Bearer $env:GH_TOKEN"; "Accept" = "application/vnd.github+json" }
           $release = Invoke-RestMethod -Uri "https://api.github.com/repos/git-lfs/git-lfs/releases/latest" -Headers $headers
           $asset = $release.assets | Where-Object { $_.name -like "git-lfs-windows-amd64-*.zip" } | Select-Object -First 1
           if (-not $asset) { throw "Git LFS Windows amd64 ZIP not found" }
