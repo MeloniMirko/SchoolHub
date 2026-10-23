@@ -1,5 +1,5 @@
 #define MyAppName "SchoolHub"
-#define MyAppVersion "2.6.4"
+#define MyAppVersion "2.6.6"
 #define MyAppPublisher "SchoolHub"
 #define MyAppExeName "SchoolHub.exe"
 
@@ -28,12 +28,12 @@ SetupLogging=yes
 UninstallDisplayIcon={app}\{#MyAppExeName}
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-VersionInfoVersion=2.6.4.0
+VersionInfoVersion=2.6.6.0
 VersionInfoProductName=SchoolHub
 VersionInfoDescription=SchoolHub Installer
 VersionInfoCompany=SchoolHub
 VersionInfoCopyright=Copyright © 2026 SchoolHub
-VersionInfoProductVersion=2.6.4.0
+VersionInfoProductVersion=2.6.6.0
 
 [Languages]
 Name: "italian"; MessagesFile: "compiler:Languages\Italian.isl"
@@ -42,7 +42,7 @@ Name: "italian"; MessagesFile: "compiler:Languages\Italian.isl"
 Name: "desktopicon"; Description: "Crea un'icona sul desktop"; GroupDescription: "Collegamenti:"; Flags: unchecked
 
 [Files]
-Source: "..\..\dist\SchoolHub.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\dist\SchoolHub\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\SchoolHub"; Filename: "{app}\{#MyAppExeName}"

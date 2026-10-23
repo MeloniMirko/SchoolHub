@@ -31,10 +31,37 @@ class GitHubAuthTests(unittest.TestCase):
         self.app.github_user = 'OldAccount'
         self.app.git = Mock(return_value=(0, '', ''))
         self.app._github_host_credential = Mock(return_value=('hint', 'test-session'))
-        self.app._github_api_json = Mock(return_value={'login': 'CorrectStudent'})
+        self.app._github_api_json = Mock(return_value=({'login': 'CorrectStudent'}, {'x-ratelimit-remaining': '500'}))
         self.app._github_browser_login('temporary-repo')
         self.assertEqual(self.app.github_user, 'CorrectStudent')
         self.assertNotIn('test-session', str(self.app.write_log.call_args_list))
+
+    def test_github_login_rejects_unexpected_api_payload_without_raw_attribute_error(self):
+        self.app.git = Mock(return_value=(0, '', ''))
+        self.app._github_host_credential = Mock(return_value=('hint', 'redacted'))
+        self.app._github_api_json = Mock(return_value=([], {}))
+        with self.assertRaisesRegex(WorkspaceError, 'profilo GitHub non valida'):
+            self.app._github_browser_login('temporary-repo')
+        self.assertEqual(self.app.github_user, '')
+
+    def test_auth_retry_uses_real_login_tuple_response(self):
+        commands = []
+        def git(command, **_kwargs):
+            commands.append(list(command))
+            if command[0] == 'push' and sum(x[0] == 'push' for x in commands) == 1:
+                return 128, '', 'Permission to repository denied to OldAccount'
+            return 0, 'ok', ''
+        self.app.git = git
+        self.app.github_user = 'OldAccount'
+        self.app._github_host_credential = Mock(return_value=('hint', 'token-not-for-logs'))
+        self.app._github_api_json = Mock(return_value=({'login': 'FreshAccount'}, {'etag': 'cache'}))
+        result = self.app._push_with_auth_retry('temporary-repo')
+        self.assertEqual(result, 'ok')
+        self.assertEqual(self.app.github_user, 'FreshAccount')
+        self.assertIn(['remote', 'set-url', 'origin',
+                       'https://FreshAccount@github.com/SchoolOrganization/Lessons.git'], commands)
+        self.assertEqual(sum(item[0] == 'push' for item in commands), 2)
+        self.assertNotIn('token-not-for-logs', str(self.app.write_log.call_args_list))
 
     def test_push_uses_refreshed_account_and_retries_once(self):
         calls = []

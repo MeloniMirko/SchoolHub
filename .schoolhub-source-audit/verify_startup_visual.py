@@ -12,7 +12,7 @@ env = os.environ.copy()
 env['PYINSTALLER_RESET_ENVIRONMENT'] = '1'
 # Test the critical fallback: the intro must work without the bootloader splash.
 env['PYINSTALLER_SUPPRESS_SPLASH_SCREEN'] = '1'
-p = subprocess.Popen([str(Path('dist/SchoolHub.exe').resolve()), '--startup-visual-test', str(out)], env=env)
+p = subprocess.Popen([str(Path('dist/SchoolHub/SchoolHub.exe').resolve()), '--startup-visual-test', str(out)], env=env)
 
 def wait_stage(stage):
     deadline = time.monotonic() + 45

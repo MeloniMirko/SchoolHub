@@ -5,6 +5,8 @@ import hashlib
 import secrets
 import shutil
 import struct
+import errno
+import time
 from pathlib import Path
 
 _AESGCM = None
@@ -20,6 +22,21 @@ def _aesgcm():
 
 class WorkspaceError(Exception):
     pass
+
+
+def retry_sharing_violation(operation, attempts=4, delay=0.18):
+    """Retry transient Windows sharing failures; propagate persistent errors."""
+    for attempt in range(attempts):
+        try:
+            return operation()
+        except OSError as exc:
+            winerror = getattr(exc, "winerror", None)
+            transient = winerror in (32, 33) or (
+                winerror is None and exc.errno in (errno.EACCES, errno.EPERM)
+            )
+            if not transient or attempt + 1 == attempts:
+                raise
+            time.sleep(delay * (attempt + 1))
 
 
 class WorkspaceManager:
@@ -272,7 +289,7 @@ class WorkspaceManager:
                 fh.write(data)
                 fh.flush()
                 os.fsync(fh.fileno())
-            os.replace(tmp, path)
+            retry_sharing_violation(lambda: os.replace(tmp, path))
         finally:
             try:
                 tmp.unlink()
@@ -1012,7 +1029,7 @@ class WorkspaceManager:
                             shutil.copyfileobj(inp, out, length=4 * 1024 * 1024)
                             out.flush()
                             os.fsync(out.fileno())
-                        os.replace(os.fspath(tmp), os.fspath(dst_io))
+                        retry_sharing_violation(lambda: os.replace(os.fspath(tmp), os.fspath(dst_io)))
                     finally:
                         try: tmp.unlink()
                         except FileNotFoundError: pass

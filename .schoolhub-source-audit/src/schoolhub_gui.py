@@ -16,9 +16,10 @@ import uuid
 import zipfile
 import platform
 import re
+import traceback
 from datetime import datetime, timezone
 
-from workspace import WorkspaceManager, WorkspaceError
+from workspace import WorkspaceManager, WorkspaceError, retry_sharing_violation
 
 
 # ============================================================
@@ -32,10 +33,10 @@ CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 LOG_FILE = os.path.join(APP_DIR, "schoolhub.log")
 SYNC_STATE_FILE = os.path.join(APP_DIR, "sync_state.json")
 
-APP_VERSION = "2.6.4"
+APP_VERSION = "2.6.6"
 RELEASE_API = "https://api.github.com/repos/MeloniMirko/SchoolHub/releases/latest"
 RELEASES_API = "https://api.github.com/repos/MeloniMirko/SchoolHub/releases?per_page=30"
-UPDATE_USER_AGENT = "SchoolHub-Updater/2.6.4"
+UPDATE_USER_AGENT = "SchoolHub-Updater/2.6.6"
 UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 UPDATE_STAMP_FILE = os.path.join(APP_DIR, "last_update_check.txt")
 GIT_TIMEOUT_SECONDS = 180
@@ -126,20 +127,20 @@ def bundled_git_info():
 # COLORS
 # ============================================================
 
-BG = "#070b12"
-PANEL = "#0d1520"
-PANEL2 = "#121d2a"
-PANEL3 = "#182536"
-BORDER = "#26384e"
+BG = "#080f1d"
+PANEL = "#111d30"
+PANEL2 = "#192940"
+PANEL3 = "#213654"
+BORDER = "#2c415b"
 
-TEXT = "#f4f7fb"
-MUTED = "#91a0b5"
+TEXT = "#f0f7ff"
+MUTED = "#a6b7ce"
 
-GREEN = "#22c55e"
-YELLOW = "#fbbf24"
-RED = "#fb7185"
-BLUE = "#2f81f7"
-CYAN = "#38bdf8"
+GREEN = "#36d49c"
+YELLOW = "#ffc86e"
+RED = "#ff748c"
+BLUE = "#287bff"
+CYAN = "#66d7ff"
 
 
 # ============================================================
@@ -196,12 +197,18 @@ def load_config():
 def save_config(config):
     os.makedirs(APP_DIR, exist_ok=True)
 
-    temp_file = CONFIG_FILE + ".tmp"
-
-    with open(temp_file, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=4)
-
-    os.replace(temp_file, CONFIG_FILE)
+    temp_file = CONFIG_FILE + ".tmp-" + uuid.uuid4().hex
+    try:
+        with open(temp_file, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=4)
+            f.flush()
+            os.fsync(f.fileno())
+        retry_sharing_violation(lambda: os.replace(temp_file, CONFIG_FILE))
+    finally:
+        try:
+            os.unlink(temp_file)
+        except FileNotFoundError:
+            pass
 
 
 
@@ -1388,6 +1395,18 @@ class SchoolHub:
 
         self.clear_content()
 
+        hero = tk.Frame(self.content, bg=BG)
+        hero.pack(fill="x", pady=(0, 18))
+        tk.Label(
+            hero, text="IL TUO SPAZIO, OVUNQUE.",
+            font=("Segoe UI", 11, "bold"), fg=CYAN, bg=BG
+        ).pack(anchor="w", pady=(2, 5))
+        tk.Label(
+            hero, text="File protetti. Dispositivi collegati. Tutto sotto controllo.",
+            font=("Segoe UI", 10), fg=MUTED, bg=BG,
+            anchor="w", justify="left", wraplength=690
+        ).pack(anchor="w")
+
         status = tk.Frame(
             self.content,
             bg=PANEL,
@@ -2197,10 +2216,11 @@ class SchoolHub:
         except Exception as e:
             messagebox.showerror("Workspace", f"Impossibile aprire il Workspace:\n{e}")
 
-    def _resolve_conflict(self, choice):
-        """Resolve all currently conflicting files in one explicit operation.
-        choice='local' keeps the encrypted Workspace version.
-        choice='remote' keeps the GitHub version.
+    def _resolve_conflict(self, choice, choices=None):
+        """Resolve conflicts only after the user confirms the selected versions.
+
+        Mixed mode requires a local/remote choice for every conflicting path.
+        The worker validates the live conflict set again before writing anything.
         """
         if not self.git_enabled:
             return
@@ -2228,12 +2248,27 @@ class SchoolHub:
                 "I file in conflitto su GitHub verranno sostituiti "
                 "dalla copia locale e verrà creato un nuovo commit."
             )
-        else:
+        elif choice == "remote":
             question = (
                 "Vuoi usare GitHub come versione definitiva?\n\n"
                 "I file in conflitto locali verranno sostituiti "
                 "dalla copia presente su GitHub."
             )
+        elif choice == "mixed":
+            if not isinstance(choices, dict) or not choices or any(
+                value not in ("local", "remote") for value in choices.values()
+            ):
+                messagebox.showwarning("Conflitti", "Scegli una versione per ogni file prima di continuare.", parent=self.root)
+                return
+            n_local = sum(v == "local" for v in choices.values())
+            n_remote = sum(v == "remote" for v in choices.values())
+            question = (
+                f"Confermi le scelte per {len(choices)} file?\n\n"
+                f"Workspace: {n_local}\nGitHub: {n_remote}\n\n"
+                "SchoolHub ricontrollerà che nessun file sia cambiato prima di applicarle."
+            )
+        else:
+            raise ValueError("Scelta di risoluzione non valida.")
 
         if not messagebox.askyesno("Risolvi conflitti", question, parent=self.root):
             return
@@ -2242,11 +2277,11 @@ class SchoolHub:
         self.set_status("RISOLUZIONE CONFLITTI...", YELLOW, "Operazione esplicita richiesta")
         threading.Thread(
             target=self._resolve_conflict_worker,
-            args=(choice, password),
+            args=(choice, password, choices),
             daemon=True
         ).start()
 
-    def _resolve_conflict_worker(self, choice, password):
+    def _resolve_conflict_worker(self, choice, password, choices=None):
         temp_root = tempfile.mkdtemp(prefix="schoolhub-conflict-")
         repo = os.path.join(temp_root, "repo")
         try:
@@ -2264,11 +2299,23 @@ class SchoolHub:
                 self.last_conflicts = []
                 raise WorkspaceError("Non risultano più conflitti. Aggiorna lo stato e sincronizza normalmente.")
 
-            # Start from GitHub. Preserve independent local changes, and apply the
-            # conflicting local paths only when the user explicitly chose Workspace.
+            if choice == "mixed":
+                if (not isinstance(choices, dict)
+                        or set(choices) != set(conflicts)
+                        or any(v not in ("local", "remote") for v in choices.values())):
+                    raise WorkspaceError(
+                        "L'elenco dei conflitti è cambiato o contiene scelte incomplete. "
+                        "Riapri Conflitti e scegli nuovamente la versione di ogni file."
+                    )
+            elif choice not in ("local", "remote"):
+                raise WorkspaceError("Scelta di risoluzione non valida.")
+
+            # Preserve all independent changes and apply only explicitly chosen paths.
             paths_to_take_local = set(local_only)
             if choice == "local":
                 paths_to_take_local.update(conflicts)
+            elif choice == "mixed":
+                paths_to_take_local.update(p for p in conflicts if choices[p] == "local")
 
             if self.workspace.is_unlocked and self._hash_tree(self.workspace.get_unlocked_path()) != local_files:
                 raise WorkspaceError(
@@ -2281,6 +2328,8 @@ class SchoolHub:
             paths_from_remote = set(remote_only)
             if choice == "remote":
                 paths_from_remote.update(conflicts)
+            elif choice == "mixed":
+                paths_from_remote.update(p for p in conflicts if choices[p] == "remote")
             self._persist_sync_tree(repo, password, temp_root, paths_from_remote)
 
             self._ensure_git_identity(repo)
@@ -2300,9 +2349,12 @@ class SchoolHub:
             if choice == "local":
                 self.write_log(f"✓ Conflitti risolti: mantenuto Workspace per {len(conflicts)} file.")
                 self.finish_status("SINCRONIZZATO", GREEN, "Conflitti risolti: mantenuto Workspace")
-            else:
+            elif choice == "remote":
                 self.write_log(f"✓ Conflitti risolti: mantenuto GitHub per {len(conflicts)} file.")
                 self.finish_status("SINCRONIZZATO", GREEN, "Conflitti risolti: mantenuto GitHub")
+            else:
+                self.write_log(f"✓ Conflitti risolti individualmente: {len(conflicts)} file.")
+                self.finish_status("SINCRONIZZATO", GREEN, "Scelte individuali applicate")
         except Exception as e:
             code = self._error_code("sync", e)
             self.write_log(f"✕ [{code}] Risoluzione conflitti fallita: {e}")
@@ -2354,40 +2406,103 @@ class SchoolHub:
         )
         conflict_list.pack(fill="x", padx=22, pady=(0, 22))
 
+        # Keep choices attached to paths, not list indices. No automatic overwrite.
+        resolution_choices = {}
+        shown_conflicts = []
+
+        choice_hint = tk.Label(
+            self.content,
+            text="Seleziona un file e indica quale versione conservare. Nessuna scelta predefinita.",
+            font=("Segoe UI", 9), fg=MUTED, bg=BG,
+            wraplength=640, justify="left"
+        )
+        choice_hint.pack(anchor="w", pady=(0, 8))
+
+        def render_conflict_choices():
+            selected = conflict_list.curselection()
+            conflict_list.delete(0, tk.END)
+            for path in shown_conflicts:
+                decision = resolution_choices.get(path)
+                label = ("✓  WORKSPACE" if decision == "local" else
+                         "✓  GITHUB   " if decision == "remote" else
+                         "·  DA DECIDERE")
+                conflict_list.insert(tk.END, f"{label}    {path}")
+            conflict_list.configure(height=min(12, max(3, len(shown_conflicts))))
+            for index in selected:
+                if index < len(shown_conflicts):
+                    conflict_list.selection_set(index)
+            pending = sum(p not in resolution_choices for p in shown_conflicts)
+            choice_hint.configure(text=(
+                f"File in conflitto: {len(shown_conflicts)}   ·   Da decidere: {pending}. "
+                "Le versioni non selezionate non verranno mai sostituite."
+            ))
+
+        def choose_selected(decision):
+            indices = conflict_list.curselection()
+            if not indices:
+                messagebox.showinfo("Conflitti", "Seleziona uno o più file nell'elenco.", parent=self.root)
+                return
+            for index in indices:
+                if index < len(shown_conflicts):
+                    resolution_choices[shown_conflicts[index]] = decision
+            render_conflict_choices()
+
+        def apply_individual_choices():
+            if not shown_conflicts:
+                messagebox.showinfo("Conflitti", "Non ci sono conflitti da risolvere.", parent=self.root)
+                return
+            missing = [p for p in shown_conflicts if p not in resolution_choices]
+            if missing:
+                messagebox.showwarning(
+                    "Scelte incomplete",
+                    f"Seleziona la versione da mantenere per tutti i file. Mancano {len(missing)} scelte.",
+                    parent=self.root
+                )
+                return
+            self._resolve_conflict("mixed", dict(resolution_choices))
+
+        conflict_list.configure(selectmode=tk.EXTENDED)
+        conflict_list.bind("<Double-Button-1>", lambda _event: choose_selected("local"))
+
         buttons = tk.Frame(self.content, bg=BG)
         buttons.pack(anchor="w", pady=10)
 
         tk.Button(
-            buttons, text="MANTIENI WORKSPACE",
-            command=lambda: self._resolve_conflict("local"),
-            bg=BLUE, fg="white", activebackground=BLUE,
-            relief="flat", bd=0, cursor="hand2",
-            font=("Segoe UI", 10, "bold"), padx=20, pady=11
+            buttons, text="USA WORKSPACE PER I SELEZIONATI",
+            command=lambda: choose_selected("local"),
+            bg=BLUE, fg="white", activebackground=BLUE, activeforeground="white",
+            relief="flat", bd=0, cursor="hand2", font=("Segoe UI", 9, "bold"),
+            padx=12, pady=11
         ).pack(side="left")
 
         tk.Button(
-            buttons, text="MANTIENI GITHUB",
-            command=lambda: self._resolve_conflict("remote"),
+            buttons, text="USA GITHUB PER I SELEZIONATI",
+            command=lambda: choose_selected("remote"),
             bg=PANEL2, fg=TEXT, activebackground=BORDER,
-            relief="flat", bd=0, cursor="hand2",
-            font=("Segoe UI", 10, "bold"), padx=20, pady=11
-        ).pack(side="left", padx=10)
+            relief="flat", bd=0, cursor="hand2", font=("Segoe UI", 9, "bold"),
+            padx=12, pady=11
+        ).pack(side="left", padx=8)
 
+        actions = tk.Frame(self.content, bg=BG)
+        actions.pack(anchor="w", pady=(2, 12))
         tk.Button(
-            buttons, text="SINCRONIZZA",
-            command=self.start_sync,
-            bg=PANEL2, fg=TEXT, activebackground=BORDER,
-            relief="flat", bd=0, cursor="hand2",
-            font=("Segoe UI", 10, "bold"), padx=20, pady=11
+            actions, text="CONFERMA TUTTE LE SCELTE",
+            command=apply_individual_choices,
+            bg=GREEN, fg=BG, activebackground=GREEN, relief="flat", bd=0,
+            cursor="hand2", font=("Segoe UI", 10, "bold"), padx=16, pady=11
         ).pack(side="left")
-
         tk.Button(
-            buttons, text="AGGIORNA",
-            command=self.show_conflicts,
-            bg=PANEL2, fg=TEXT, activebackground=BORDER,
-            relief="flat", bd=0, cursor="hand2",
-            font=("Segoe UI", 10, "bold"), padx=20, pady=11
-        ).pack(side="left", padx=10)
+            actions, text="SINCRONIZZA",
+            command=self.start_sync, bg=PANEL2, fg=TEXT,
+            relief="flat", bd=0, font=("Segoe UI", 9, "bold"),
+            padx=12, pady=11
+        ).pack(side="left", padx=8)
+        tk.Button(
+            actions, text="AGGIORNA",
+            command=self.show_conflicts, bg=PANEL2, fg=TEXT,
+            relief="flat", bd=0, font=("Segoe UI", 9, "bold"),
+            padx=12, pady=11
+        ).pack(side="left")
 
         generation = self.page_generation
 
@@ -2406,18 +2521,23 @@ class SchoolHub:
                         )
                         return
 
-                    if local > 0 and remote > 0:
+                    if self.last_conflicts:
                         status_label.configure(text="⚠ CONFLITTO RILEVATO", fg=RED)
                         detail_label.configure(
                             text=(
                                 f"Workspace: {local} file cambiati · GitHub: {remote} file cambiati.\n"
                                 f"I file sotto sono quelli che sono stati modificati da entrambe le parti.\n"
-                                "Solo questi sono veri conflitti. Scegli quale versione mantenere per TUTTI i file elencati."
+                                "Solo questi sono veri conflitti. Scegli una versione per ciascun file."
                             )
                         )
-                        for path in self.last_conflicts:
-                            conflict_list.insert(tk.END, path)
-                        conflict_list.configure(height=min(12, max(3, len(self.last_conflicts))))
+                        shown_conflicts[:] = list(self.last_conflicts)
+                        resolution_choices.clear()
+                        render_conflict_choices()
+                    elif local > 0 and remote > 0:
+                        status_label.configure(text="MODIFICHE INDIPENDENTI", fg=CYAN)
+                        detail_label.configure(
+                            text=f"{local} modifiche locali e {remote} modifiche GitHub su file diversi. Nessun conflitto: usa Sincronizza."
+                        )
                     elif local > 0:
                         status_label.configure(text="MODIFICHE SOLO LOCALI", fg=YELLOW)
                         detail_label.configure(
@@ -3791,12 +3911,18 @@ class SchoolHub:
                 if rel == ".gitattributes":
                     continue
                 h = hashlib.sha256()
-                with open(path, "rb") as fh:
-                    while True:
-                        chunk = fh.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        h.update(chunk)
+                try:
+                    with open(path, "rb") as fh:
+                        while True:
+                            chunk = fh.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            h.update(chunk)
+                except OSError as exc:
+                    raise WorkspaceError(
+                        f"Impossibile leggere '{rel}' durante la sincronizzazione: {exc}. "
+                        "Chiudi il programma che lo sta utilizzando e riprova."
+                    ) from exc
                 result[rel] = h.hexdigest()
         return result
 
@@ -3830,7 +3956,15 @@ class SchoolHub:
                     continue
                 if os.path.islink(source_file):
                     raise WorkspaceError(f"Collegamento simbolico non supportato: {source_file}")
-                shutil.copy2(source_file, os.path.join(target_dir, name))
+                try:
+                    retry_sharing_violation(
+                        lambda: shutil.copy2(source_file, os.path.join(target_dir, name))
+                    )
+                except OSError as exc:
+                    raise WorkspaceError(
+                        f"Impossibile copiare '{rel_file}' nello snapshot: {exc}. "
+                        "Verifica i permessi e chiudi l'eventuale programma che lo sta usando."
+                    ) from exc
 
     @staticmethod
     def _replace_tree(src, dst):
@@ -3861,10 +3995,18 @@ class SchoolHub:
 
     def _save_sync_state(self, files):
         os.makedirs(os.path.dirname(self.sync_state_file), exist_ok=True)
-        tmp = self.sync_state_file + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump({"version": 1, "files": files}, fh, indent=2, sort_keys=True)
-        os.replace(tmp, self.sync_state_file)
+        tmp = self.sync_state_file + ".tmp-" + uuid.uuid4().hex
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump({"version": 1, "files": files}, fh, indent=2, sort_keys=True)
+                fh.flush()
+                os.fsync(fh.fileno())
+            retry_sharing_violation(lambda: os.replace(tmp, self.sync_state_file))
+        finally:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
 
     def _git_remote_for_auth(self):
         """Use only an explicitly selected account, never infer one from repo ownership."""
@@ -4043,7 +4185,9 @@ class SchoolHub:
         # Resolve the real OAuth identity, not the repository owner or a stale hint.
         _, token = self._github_host_credential()
         try:
-            account = self._github_api_json("https://api.github.com/user", token)
+            account, _headers = self._github_api_json("https://api.github.com/user", token)
+            if not isinstance(account, dict):
+                raise WorkspaceError("Risposta del profilo GitHub non valida. Riprova l'accesso.")
             username = account.get("login", "")
             if not username:
                 raise WorkspaceError("Authentication failed: GitHub non ha restituito l'account autenticato.")
@@ -4347,6 +4491,9 @@ class SchoolHub:
         except Exception as e:
             code = self._error_code("sync", e)
             self.write_log(f"✕ [{code}] ERRORE SYNC: {e}")
+            self.write_log("Dettaglio tecnico sync:\n" + "".join(
+                traceback.format_exception(type(e), e, e.__traceback__)
+            ))
             self.progress_update(100, "Errore", f"[{code}] {e}")
             if self.last_conflicts: self.finish_status("CONFLITTO", RED, f"[{code}] {e}")
             else: self.finish_status("ERRORE", RED, f"[{code}] {e}")
@@ -4371,6 +4518,10 @@ class SchoolHub:
             local, remote, changes = self.get_status()
 
             if local is None:
+                if self.running:
+                    self.root.after(0, lambda detail=str(changes): self.set_status(
+                        "VERIFICA NON DISPONIBILE", RED, detail[:170]
+                    ))
                 return
 
             if not self.running:
@@ -4485,12 +4636,20 @@ class SchoolHub:
                 f"{remote} file da GitHub"
             )
 
-        else:
+        elif self.last_conflicts:
 
             self.set_status(
                 "CONFLITTO",
                 RED,
-                "Locale e GitHub divergenti"
+                f"{len(self.last_conflicts)} file in conflitto"
+            )
+
+        else:
+
+            self.set_status(
+                "DA SINCRONIZZARE",
+                YELLOW,
+                f"{local} modifiche locali · {remote} modifiche GitHub"
             )
 
     # ========================================================
@@ -4702,6 +4861,10 @@ class SchoolHub:
             return "SH-SYNC-301"
         if "in uso" in text or "being used" in text or "winerror 32" in text:
             return "SH-SYNC-302"
+        if (isinstance(exc, PermissionError) or "permission denied" in text
+                or "access is denied" in text or "accesso negato" in text
+                or "winerror 5" in text):
+            return "SH-SYNC-303"
         if "cifr" in text or "vault" in text or "shenc" in text:
             return "SH-VLT-201"
         if "path" in text or "percorso" in text or "filename" in text:
@@ -5552,30 +5715,56 @@ def _startup_probe(root, stage):
 
 
 def show_startup_intro(root):
-    """A real animated first frame, also when the bootloader splash is unavailable."""
+    """Animated, branded startup window even without PyInstaller's splash."""
     import math
     root.withdraw()
-    root.configure(bg="#081120")
+    root.configure(bg="#08101e")
     root.overrideredirect(True)
     root.attributes("-topmost", True)
     width, height = 680, 410
     x = (root.winfo_screenwidth() - width) // 2
     y = (root.winfo_screenheight() - height) // 2
     root.geometry(f"{width}x{height}+{x}+{y}")
-    canvas = tk.Canvas(root, width=width, height=height, bg="#081120",
+    canvas = tk.Canvas(root, width=width, height=height, bg="#08101e",
                        highlightthickness=0, borderwidth=0)
     canvas.pack(fill="both", expand=True)
-    canvas.create_rectangle(8, 8, 671, 401, fill="#0a182c", outline="#237cff", width=2)
-    canvas.create_text(340, 112, text="SH", fill="#49bdff", font=("Segoe UI", 62, "bold"))
-    canvas.create_text(340, 220, text="SchoolHub", fill="#f4f8ff", font=("Segoe UI", 32, "bold"))
-    canvas.create_text(340, 270, text="Il tuo spazio. Sempre con te.", fill="#a1bcdc", font=("Segoe UI", 14))
-    canvas.create_rectangle(35, 327, 645, 357, fill="#112743", outline="")
-    bar = canvas.create_rectangle(36, 328, 156, 356, fill="#1479ff", outline="")
-    canvas.create_text(340, 383, text=f"Avvio di SchoolHub {APP_VERSION}", fill="#7797bc", font=("Segoe UI", 10))
+
+    canvas.create_rectangle(8, 8, 672, 402, fill="#101e34",
+                            outline="#2b5280", width=2)
+    canvas.create_line(28, 28, 652, 28, fill="#234a78", width=2)
+    canvas.create_arc(228, 13, 452, 237, start=0, extent=76,
+                      style=tk.ARC, outline="#47caff", width=3, tags="arc_main")
+    canvas.create_arc(240, 25, 440, 225, start=180, extent=86,
+                      style=tk.ARC, outline="#295785", width=2, tags="arc_sub")
+    dots = [
+        canvas.create_oval(0, 0, 10, 10, fill=color, outline="")
+        for color in ("#9ae7ff", "#5fcaff", "#2f81f7")
+    ]
+    icon_path = resource_path("schoolhub_icon.png")
+    if icon_path:
+        try:
+            raw_icon = tk.PhotoImage(file=icon_path)
+            scale = max(1, (max(raw_icon.width(), raw_icon.height()) + 143) // 144)
+            canvas._boot_logo = raw_icon.subsample(scale, scale)
+            canvas.create_image(340, 125, image=canvas._boot_logo)
+        except (tk.TclError, OSError):
+            canvas.create_text(340, 125, text="SH", fill="#66d7ff",
+                               font=("Segoe UI", 51, "bold"))
+    else:
+        canvas.create_text(340, 125, text="SH", fill="#66d7ff",
+                           font=("Segoe UI", 51, "bold"))
+    canvas.create_text(340, 250, text="SchoolHub", fill="#f0f7ff",
+                       font=("Segoe UI", 32, "bold"))
+    canvas.create_text(340, 289, text="IL TUO SPAZIO. OVUNQUE.",
+                       fill="#9fb9d8", font=("Segoe UI", 11, "bold"))
+    canvas.create_rectangle(36, 327, 644, 357, fill="#132941", outline="#28517e")
+    bar = canvas.create_rectangle(38, 330, 154, 354, fill="#287bff", outline="")
+    canvas.create_text(340, 384, text="PREPARAZIONE AMBIENTE SICURO",
+                       fill="#a3b8ce", font=("Segoe UI", 9, "bold"))
+
     root.update_idletasks()
     root.deiconify()
     root.update()
-    # Keep the boot intro until the application's own intro has actually painted.
     try:
         import pyi_splash
         if pyi_splash.is_alive():
@@ -5585,12 +5774,25 @@ def show_startup_intro(root):
     _startup_probe(root, "intro")
     started = time.monotonic()
     done = tk.BooleanVar(root, False)
-    duration = 3.0 if len(sys.argv) > 1 and sys.argv[1] == "--startup-visual-test" else 1.2
+    duration = 3.0 if len(sys.argv) > 1 and sys.argv[1] == "--startup-visual-test" else 1.35
 
     def animate():
+        if not canvas.winfo_exists():
+            done.set(True)
+            return
         elapsed = time.monotonic() - started
-        left = 36 + 244 * (1 - math.cos(elapsed * 3.0))
-        canvas.coords(bar, left, 328, left + 120, 356)
+        phase = (elapsed * 115) % 360
+        canvas.itemconfigure("arc_main", start=phase + 8)
+        canvas.itemconfigure("arc_sub", start=192 - phase * 0.75)
+        for index, particle in enumerate(dots):
+            theta = math.radians(phase + 120 * index)
+            px = 340 + 108 * math.cos(theta)
+            py = 125 + 108 * math.sin(theta)
+            radius = 5.5 - index * 0.8
+            canvas.coords(particle, px-radius, py-radius, px+radius, py+radius)
+        sweep = (1.0 - math.cos(math.radians(phase))) / 2.0
+        left = 38 + 489 * sweep
+        canvas.coords(bar, left, 330, left + 116, 354)
         if elapsed >= duration:
             done.set(True)
         else:
