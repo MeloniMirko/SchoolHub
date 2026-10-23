@@ -2513,6 +2513,15 @@ class SchoolHub:
             self._assert_safe_merged_tree(proposed)
             self._verify_remote_head(repo)
             self._create_conflict_recovery(source, local_files, password)
+            # The verified backup may take time for large media collections.
+            # Check the live tree again before any write; never overwrite a
+            # document edited while the backup was being created.
+            if (self.workspace.is_unlocked and
+                    self._hash_tree(self.workspace.get_unlocked_path()) != local_files):
+                raise WorkspaceError(
+                    "Un file del Workspace è cambiato durante il backup. "
+                    "Le versioni sono state conservate, ma nessuna scelta è stata applicata."
+                )
             if paths_to_take_local:
                 self._apply_paths(source, repo, local_files, paths_to_take_local)
 
@@ -2829,7 +2838,19 @@ class SchoolHub:
                 "Se un altro dispositivo modifica i file nel frattempo, l'operazione viene annullata."
             )
         )
-        help_text.pack(fill="x", pady=(2, 15))
+        help_text.pack(fill="x", pady=(2, 9))
+        tk.Button(
+            self.content, text="APRI CARTELLA BACKUP CIFRATI",
+            command=lambda: os.startfile(os.path.join(APP_DIR, "Backups", "ConflictRecovery"))
+            if os.name == "nt" and os.path.isdir(os.path.join(APP_DIR, "Backups", "ConflictRecovery"))
+            else messagebox.showinfo(
+                "Backup", "La cartella dei backup cifrati verrà creata alla prima risoluzione.",
+                parent=self.root
+            ),
+            bg=PANEL2, fg=CYAN, activebackground=PANEL3, activeforeground=TEXT,
+            relief="flat", bd=0, cursor="hand2", font=("Segoe UI", 9, "bold"),
+            padx=13, pady=9
+        ).pack(anchor="w", pady=(0, 16))
         query.trace_add("write", lambda *_: repaint())
         filter_menu.bind("<<ComboboxSelected>>", lambda _event: repaint())
 
