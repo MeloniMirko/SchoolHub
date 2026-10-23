@@ -289,6 +289,96 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(self.state.read_bytes(), before)
         self.assertTrue(any(item[0] == 'ERRORE' for item in statuses))
 
+    def test_conflict_recovery_is_encrypted_and_restores_local_edits(self):
+        git_seed_remote(self.remote, {'doc.txt': 'BASE'})
+        self.wm.unlock(PASSWORD)
+        self.app.sync_worker(None)
+        (self.wp/'doc.txt').write_text('IMPORTANT LOCAL EDIT', encoding='utf-8')
+        git_remote_change(self.remote, 'doc.txt', 'REMOTE EDIT')
+        self.app.sync_worker(None)
+        with mock.patch.object(schoolhub_gui, 'APP_DIR', str(self.td/'Application')):
+            self.app._resolve_conflict_worker('remote', None)
+            recovery = Path(self.app._last_conflict_recovery)
+        self.assertTrue((recovery/'Vault'/'vault.json').is_file())
+        self.assertFalse((recovery/'doc.txt').exists())
+        encrypted = (recovery/'Vault'/'files'/'doc.txt').read_bytes()
+        self.assertNotIn(b'IMPORTANT LOCAL EDIT', encrypted)
+        restored = self.td/'restored'
+        backup = WorkspaceManager(restored, recovery/'Vault')
+        backup.export_to(restored, PASSWORD)
+        self.assertEqual((restored/'doc.txt').read_text(encoding='utf-8'), 'IMPORTANT LOCAL EDIT')
+        self.assertEqual((self.wp/'doc.txt').read_text(encoding='utf-8'), 'REMOTE EDIT')
+
+    def test_stale_review_token_blocks_all_writes(self):
+        git_seed_remote(self.remote, {'doc.txt':'BASE'})
+        self.wm.unlock(PASSWORD)
+        self.app.sync_worker(None)
+        (self.wp/'doc.txt').write_text('LOCAL', encoding='utf-8')
+        git_remote_change(self.remote, 'doc.txt', 'REMOTE')
+        before_state = self.state.read_bytes()
+        errors = []
+        self.app.finish_status = lambda *args: errors.append(args)
+        with mock.patch.object(schoolhub_gui, 'APP_DIR', str(self.td/'Application')):
+            self.app._resolve_conflict_worker('mixed', None, {'doc.txt':'remote'}, 'stale-token')
+            self.assertFalse((self.td/'Application'/'Backups'/'ConflictRecovery').exists())
+        self.assertEqual(self.state.read_bytes(), before_state)
+        self.assertEqual((self.wp/'doc.txt').read_text(encoding='utf-8'), 'LOCAL')
+        self.assertEqual(read_remote_file(self.remote, 'doc.txt'), 'REMOTE')
+        self.assertTrue(any(args[0]=='ERRORE' for args in errors))
+
+    def test_valid_review_token_resolves_selected_file(self):
+        git_seed_remote(self.remote, {'doc.txt':'BASE'})
+        self.wm.unlock(PASSWORD)
+        self.app.sync_worker(None)
+        (self.wp/'doc.txt').write_text('LOCAL', encoding='utf-8')
+        git_remote_change(self.remote, 'doc.txt', 'REMOTE')
+        with tempfile.TemporaryDirectory() as scratch:
+            self.app._clone_remote(str(Path(scratch)/'repo'))
+            remote_files = self.app._hash_tree(str(Path(scratch)/'repo'))
+        local_files = self.app._hash_tree(self.wp)
+        baseline = self.app._load_sync_state()['files']
+        token = self.app._conflict_token(baseline, local_files, remote_files)
+        with mock.patch.object(schoolhub_gui, 'APP_DIR', str(self.td/'Application')):
+            self.app._resolve_conflict_worker('mixed', None, {'doc.txt':'local'}, token)
+        self.assertEqual(read_remote_file(self.remote, 'doc.txt'), 'LOCAL')
+        self.assertTrue(Path(self.app._last_conflict_recovery).exists())
+
+    def test_backup_failure_blocks_resolution_without_writes(self):
+        git_seed_remote(self.remote, {'doc.txt':'BASE'})
+        self.wm.unlock(PASSWORD)
+        self.app.sync_worker(None)
+        (self.wp/'doc.txt').write_text('LOCAL', encoding='utf-8')
+        git_remote_change(self.remote, 'doc.txt', 'REMOTE')
+        with mock.patch.object(self.app, '_create_conflict_recovery',
+                               side_effect=PermissionError('backup destination is locked')):
+            self.app._resolve_conflict_worker('remote', None)
+        self.assertEqual((self.wp/'doc.txt').read_text(encoding='utf-8'), 'LOCAL')
+        self.assertEqual(read_remote_file(self.remote, 'doc.txt'), 'REMOTE')
+
+    def test_structural_collision_is_not_silently_merged(self):
+        with self.assertRaisesRegex(WorkspaceError, 'Conflitto strutturale'):
+            self.app._assert_safe_merged_tree({'course':'hash1', 'course/file.txt':'hash2'})
+
+    def test_text_diff_preview_is_read_only(self):
+        with tempfile.TemporaryDirectory() as d:
+            local = Path(d)/'local'; remote = Path(d)/'remote'
+            local.mkdir(); remote.mkdir()
+            (local/'note.txt').write_text('original\nold', encoding='utf-8')
+            (remote/'note.txt').write_text('original\nnew', encoding='utf-8')
+            preview = self.app._text_diff_preview(str(local), str(remote), 'note.txt')
+            self.assertIn('-old', preview)
+            self.assertIn('+new', preview)
+            self.assertEqual((local/'note.txt').read_text(), 'original\nold')
+            with self.assertRaises(WorkspaceError):
+                self.app._text_diff_preview(str(local), str(remote), '../unsafe.txt')
+
+    def test_more_than_100_conflicts_appear_in_review(self):
+        baseline = {f'folder/doc-{i:03d}.txt': str(i) for i in range(140)}
+        local = {path: 'local-'+value for path, value in baseline.items()}
+        remote = {path: 'remote-'+value for path, value in baseline.items()}
+        _lo, _ro, conflicts = self.app._classify_changes(baseline, local, remote)
+        self.assertEqual(len(conflicts), 140)
+
     def test_empty_remote_local_first_push(self):
         # Recreate Vault with a local file before first sync.
         self.wm.unlock(PASSWORD)
