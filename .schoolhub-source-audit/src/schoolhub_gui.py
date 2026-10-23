@@ -33,10 +33,10 @@ CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 LOG_FILE = os.path.join(APP_DIR, "schoolhub.log")
 SYNC_STATE_FILE = os.path.join(APP_DIR, "sync_state.json")
 
-APP_VERSION = "2.6.5"
+APP_VERSION = "2.6.6"
 RELEASE_API = "https://api.github.com/repos/MeloniMirko/SchoolHub/releases/latest"
 RELEASES_API = "https://api.github.com/repos/MeloniMirko/SchoolHub/releases?per_page=30"
-UPDATE_USER_AGENT = "SchoolHub-Updater/2.6.5"
+UPDATE_USER_AGENT = "SchoolHub-Updater/2.6.6"
 UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 UPDATE_STAMP_FILE = os.path.join(APP_DIR, "last_update_check.txt")
 GIT_TIMEOUT_SECONDS = 180
@@ -4185,7 +4185,9 @@ class SchoolHub:
         # Resolve the real OAuth identity, not the repository owner or a stale hint.
         _, token = self._github_host_credential()
         try:
-            account = self._github_api_json("https://api.github.com/user", token)
+            account, _headers = self._github_api_json("https://api.github.com/user", token)
+            if not isinstance(account, dict):
+                raise WorkspaceError("Risposta del profilo GitHub non valida. Riprova l'accesso.")
             username = account.get("login", "")
             if not username:
                 raise WorkspaceError("Authentication failed: GitHub non ha restituito l'account autenticato.")
