@@ -17,6 +17,8 @@ import zipfile
 import platform
 import re
 import traceback
+import difflib
+from pathlib import Path
 from datetime import datetime, timezone
 
 from workspace import WorkspaceManager, WorkspaceError, retry_sharing_violation
@@ -410,6 +412,7 @@ class SchoolHub:
         self.sync_running = False
         self.workspace_busy = False
         self.last_conflicts = []
+        self._last_conflict_recovery = None
         self.progress_dialog = None
         self.update_check_running = False
 
@@ -2216,7 +2219,151 @@ class SchoolHub:
         except Exception as e:
             messagebox.showerror("Workspace", f"Impossibile aprire il Workspace:\n{e}")
 
-    def _resolve_conflict(self, choice, choices=None):
+    @staticmethod
+    def _conflict_token(baseline, local_files, remote_files):
+        """Pin the complete three-way review so old decisions cannot overwrite new data."""
+        roots = (SchoolHub._tree_fingerprint(baseline),
+                 SchoolHub._tree_fingerprint(local_files),
+                 SchoolHub._tree_fingerprint(remote_files))
+        return hashlib.sha256("|".join(roots).encode("ascii")).hexdigest()
+
+    @staticmethod
+    def _assert_safe_merged_tree(files):
+        """A path cannot simultaneously be a file and another file's ancestor."""
+        names = set(files)
+        for path in names:
+            parts = path.split("/")
+            for i in range(1, len(parts)):
+                ancestor = "/".join(parts[:i])
+                if ancestor in names:
+                    raise WorkspaceError(
+                        f"Conflitto strutturale: '{ancestor}' è un file ma '{path}' "
+                        "richiede una cartella. Nessun file viene sovrascritto: "
+                        "rinomina uno dei due percorsi e ripeti la sincronizzazione."
+                    )
+
+    def _create_conflict_recovery(self, source, local_files, password):
+        """Save a verified encrypted copy of current files before overwriting any.
+
+        Unlike copying the existing Vault, this protects edits made since unlock.
+        Never stores recovered documents as plaintext in the backups directory.
+        """
+        base = os.path.join(APP_DIR, "Backups", "ConflictRecovery")
+        os.makedirs(base, exist_ok=True)
+        temporary = tempfile.mkdtemp(prefix=".pending-", dir=base)
+        destination = os.path.join(base, "Recovery-" +
+                                   datetime.now().strftime("%Y%m%d-%H%M%S") +
+                                   "-" + uuid.uuid4().hex[:8])
+        try:
+            meta = Path(self.vault_path) / "vault.json"
+            if not meta.is_file():
+                raise WorkspaceError("Vault non disponibile per il recupero dei conflitti.")
+            key = (self.workspace._session_key if self.workspace.is_unlocked
+                   else self.workspace._verify_password(password))
+            if key is None:
+                raise WorkspaceError("Chiave Vault non disponibile: backup cifrato impossibile.")
+            vault = Path(temporary) / "Vault"
+            (vault / "files").mkdir(parents=True)
+            shutil.copy2(meta, vault / "vault.json")
+            for rel in sorted(local_files):
+                relative = Path(*rel.split("/"))
+                src = Path(source) / relative
+                encrypted = vault / "files" / relative
+                self.workspace._encrypt_file(src, encrypted, key, relative)
+                self.workspace._verify_encrypted_file(encrypted, key, relative)
+            if self._hash_tree(source) != local_files:
+                raise WorkspaceError("Workspace cambiato durante il backup: nessuna scelta applicata.")
+            with open(os.path.join(temporary, "recovery.json"), "w", encoding="utf-8") as out:
+                json.dump({
+                    "version": 1,
+                    "created_utc": datetime.now(timezone.utc).isoformat(),
+                    "source_version": APP_VERSION,
+                    "fingerprint": self._tree_fingerprint(local_files),
+                    "file_count": len(local_files),
+                    "encrypted": True
+                }, out, indent=2)
+            os.replace(temporary, destination)
+            self._last_conflict_recovery = destination
+            self.write_log("✓ Recupero cifrato verificato in: " + destination)
+            return destination
+        except Exception:
+            shutil.rmtree(temporary, ignore_errors=True)
+            raise
+
+    def _inspect_conflicts(self):
+        """Fresh independent snapshot for the review screen, not global shared state."""
+        if not self.git_enabled or not self.remote:
+            raise WorkspaceError("Configura GitHub prima di controllare i conflitti.")
+        if not self.workspace.is_unlocked:
+            raise WorkspaceError("Sblocca il Workspace prima di confrontare i file.")
+        with tempfile.TemporaryDirectory(prefix="schoolhub-review-") as temporary:
+            repo = os.path.join(temporary, "repo")
+            self._assert_remote_private()
+            self._clone_remote(repo)
+            local_files = self._hash_tree(self.workspace.get_unlocked_path())
+            remote_files = self._hash_tree(repo)
+            state = self._load_sync_state()
+            baseline = state.get("files", {}) if state is not None else {}
+            if local_files == remote_files:
+                local_only, remote_only, conflicts = [], [], []
+            else:
+                local_only, remote_only, conflicts = self._classify_changes(
+                    baseline, local_files, remote_files
+                )
+            descriptions = {
+                path: ("Eliminato sul PC" if path not in local_files else
+                       "Eliminato su GitHub" if path not in remote_files else
+                       "Due versioni differenti")
+                for path in conflicts
+            }
+            return {
+                "conflicts": conflicts,
+                "descriptions": descriptions,
+                "local_count": len(local_only),
+                "remote_count": len(remote_only),
+                "token": self._conflict_token(baseline, local_files, remote_files),
+            }
+
+    @staticmethod
+    def _text_diff_preview(local_root, remote_root, rel):
+        """Bounded in-memory UTF-8 diff; never log or persist document text."""
+        if not rel or rel.startswith("/") or "\\" in rel or ".." in rel.split("/"):
+            raise WorkspaceError("Percorso non valido per l'anteprima.")
+        def read(root):
+            root = os.path.abspath(root)
+            file = os.path.abspath(os.path.join(root, *rel.split("/")))
+            if os.path.commonpath((root, file)) != root or os.path.islink(file):
+                raise WorkspaceError("Percorso non sicuro per l'anteprima.")
+            if not os.path.isfile(file):
+                return None
+            if os.path.getsize(file) > 128 * 1024:
+                return "[File oltre 128 KB: anteprima non disponibile.]"
+            with open(file, "rb") as fh:
+                data = fh.read(128 * 1024 + 1)
+            if b"\x00" in data:
+                return "[File binario: anteprima testuale non disponibile.]"
+            try:
+                return data.decode("utf-8")
+            except UnicodeDecodeError:
+                return "[File non UTF-8: anteprima non disponibile.]"
+        local, remote = read(local_root), read(remote_root)
+        if local is None and remote is None:
+            return "File assente da entrambe le copie."
+        if local is None:
+            return "ELIMINATO SUL PC\n\n" + remote[:12000]
+        if remote is None:
+            return "ELIMINATO SU GITHUB\n\n" + local[:12000]
+        if any(value.startswith("[File ") for value in (local, remote)):
+            return "Workspace: " + local[:240] + "\nGitHub: " + remote[:240]
+        lines = list(difflib.unified_diff(
+            local.splitlines(), remote.splitlines(),
+            fromfile="Workspace (PC)", tofile="GitHub (remoto)", lineterm=""
+        ))
+        return ("\n".join(lines[:180]) +
+                ("\n... Anteprima limitata alle prime 180 righe." if len(lines) > 180 else "")
+                if lines else "Le due copie risultano identiche.")
+
+    def _resolve_conflict(self, choice, choices=None, expected_token=None):
         """Resolve conflicts only after the user confirms the selected versions.
 
         Mixed mode requires a local/remote choice for every conflicting path.
@@ -2277,11 +2424,11 @@ class SchoolHub:
         self.set_status("RISOLUZIONE CONFLITTI...", YELLOW, "Operazione esplicita richiesta")
         threading.Thread(
             target=self._resolve_conflict_worker,
-            args=(choice, password, choices),
+            args=(choice, password, choices, expected_token),
             daemon=True
         ).start()
 
-    def _resolve_conflict_worker(self, choice, password, choices=None):
+    def _resolve_conflict_worker(self, choice, password, choices=None, expected_token=None):
         temp_root = tempfile.mkdtemp(prefix="schoolhub-conflict-")
         repo = os.path.join(temp_root, "repo")
         try:
@@ -2298,6 +2445,13 @@ class SchoolHub:
             if not conflicts:
                 self.last_conflicts = []
                 raise WorkspaceError("Non risultano più conflitti. Aggiorna lo stato e sincronizza normalmente.")
+            if expected_token is not None and expected_token != self._conflict_token(
+                baseline, local_files, remote_files
+            ):
+                raise WorkspaceError(
+                    "Le versioni sono cambiate dopo il controllo. "
+                    "Nessuna modifica applicata: aggiorna e verifica nuovamente le scelte."
+                )
 
             if choice == "mixed":
                 if (not isinstance(choices, dict)
@@ -2322,6 +2476,15 @@ class SchoolHub:
                     "Il Workspace è stato modificato durante la risoluzione. Nessun file viene sovrascritto: aggiorna i conflitti e riprova."
                 )
 
+            proposed = dict(remote_files)
+            for path in paths_to_take_local:
+                if path in local_files:
+                    proposed[path] = local_files[path]
+                else:
+                    proposed.pop(path, None)
+            self._assert_safe_merged_tree(proposed)
+            self._verify_remote_head(repo)
+            self._create_conflict_recovery(source, local_files, password)
             if paths_to_take_local:
                 self._apply_paths(source, repo, local_files, paths_to_take_local)
 
@@ -4357,7 +4520,7 @@ class SchoolHub:
             local_only, remote_only, conflicts = self._classify_changes(
                 baseline, local_files, remote_files
             )
-            self.last_conflicts = conflicts[:100]
+            self.last_conflicts = conflicts
             return (
                 len(local_only) + len(conflicts),
                 len(remote_only) + len(conflicts),
@@ -4424,7 +4587,7 @@ class SchoolHub:
                 local_only, remote_only, conflicts = self._classify_changes(
                     baseline, local_files, remote_files
                 )
-            self.last_conflicts = conflicts[:100]
+            self.last_conflicts = conflicts
 
             if conflicts:
                 prefix = "Prima sincronizzazione: " if state is None else ""
@@ -4444,6 +4607,15 @@ class SchoolHub:
                 return
 
             self.progress_update(52, "Merge", f"{len(local_only)} locali · {len(remote_only)} remoti")
+            proposed = dict(remote_files)
+            for path in local_only:
+                if path in local_files:
+                    proposed[path] = local_files[path]
+                else:
+                    proposed.pop(path, None)
+            self._assert_safe_merged_tree(proposed)
+            if remote_only:
+                self._verify_remote_head(repo)
             if local_only:
                 self._apply_paths(source, repo, local_files, local_only)
 
