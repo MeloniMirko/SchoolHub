@@ -35,10 +35,10 @@ CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 LOG_FILE = os.path.join(APP_DIR, "schoolhub.log")
 SYNC_STATE_FILE = os.path.join(APP_DIR, "sync_state.json")
 
-APP_VERSION = "2.6.6"
+APP_VERSION = "2.6.7"
 RELEASE_API = "https://api.github.com/repos/MeloniMirko/SchoolHub/releases/latest"
 RELEASES_API = "https://api.github.com/repos/MeloniMirko/SchoolHub/releases?per_page=30"
-UPDATE_USER_AGENT = "SchoolHub-Updater/2.6.6"
+UPDATE_USER_AGENT = "SchoolHub-Updater/2.6.7"
 UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 UPDATE_STAMP_FILE = os.path.join(APP_DIR, "last_update_check.txt")
 GIT_TIMEOUT_SECONDS = 180
@@ -129,20 +129,20 @@ def bundled_git_info():
 # COLORS
 # ============================================================
 
-BG = "#080f1d"
-PANEL = "#111d30"
-PANEL2 = "#192940"
-PANEL3 = "#213654"
-BORDER = "#2c415b"
+BG = "#0a1120"
+PANEL = "#121e31"
+PANEL2 = "#1b2b43"
+PANEL3 = "#253957"
+BORDER = "#314965"
 
-TEXT = "#f0f7ff"
-MUTED = "#a6b7ce"
+TEXT = "#eff6ff"
+MUTED = "#afc0d8"
 
-GREEN = "#36d49c"
-YELLOW = "#ffc86e"
-RED = "#ff748c"
-BLUE = "#287bff"
-CYAN = "#66d7ff"
+GREEN = "#42dfaa"
+YELLOW = "#ffd17b"
+RED = "#ff8798"
+BLUE = "#3788ff"
+CYAN = "#76daff"
 
 
 # ============================================================
@@ -1176,8 +1176,15 @@ class SchoolHub:
         button.pack(
             fill="x",
             padx=12,
-            pady=2
+            pady=3
         )
+        # Quiet hover state; the active page stays visually selected.
+        button.bind("<Enter>", lambda _e, n=name, b=button: (
+            b.configure(bg=PANEL3) if self.page_title.cget("text") != n else None
+        ))
+        button.bind("<Leave>", lambda _e, n=name, b=button: (
+            b.configure(bg=PANEL) if self.page_title.cget("text") != n else None
+        ))
 
         self.nav_buttons[name] = button
         if not hasattr(self, "nav_meta"):
@@ -1409,6 +1416,27 @@ class SchoolHub:
             font=("Segoe UI", 10), fg=MUTED, bg=BG,
             anchor="w", justify="left", wraplength=690
         ).pack(anchor="w")
+
+        actions_panel = tk.Frame(self.content, bg=BG)
+        actions_panel.pack(fill="x", pady=(0, 12))
+        tk.Label(
+            actions_panel, text="ACCESSO RAPIDO",
+            font=("Segoe UI", 9, "bold"), fg=MUTED, bg=BG
+        ).pack(anchor="w", pady=(0, 8))
+        shortcuts = tk.Frame(actions_panel, bg=BG)
+        shortcuts.pack(fill="x")
+        for label, page in (
+            ("  ↻  Sincronizzazione", "Sync"),
+            ("  ◈  Controlla conflitti", "Conflitti"),
+            ("  ◷  Ultime attività", "Attività"),
+        ):
+            tk.Button(
+                shortcuts, text=label, command=lambda p=page: self.navigate(p),
+                bg=PANEL2, fg=TEXT, activebackground=PANEL3,
+                activeforeground="white", bd=0, relief="flat",
+                cursor="hand2", font=("Segoe UI", 9, "bold"),
+                padx=15, pady=10
+            ).pack(side="left", padx=(0, 10))
 
         status = tk.Frame(
             self.content,
@@ -2255,7 +2283,7 @@ class SchoolHub:
                                    datetime.now().strftime("%Y%m%d-%H%M%S") +
                                    "-" + uuid.uuid4().hex[:8])
         try:
-            meta = Path(self.vault_path) / "vault.json"
+            meta = Path(self.workspace.vault_path) / "vault.json"
             if not meta.is_file():
                 raise WorkspaceError("Vault non disponibile per il recupero dei conflitti.")
             key = (self.workspace._session_key if self.workspace.is_unlocked
